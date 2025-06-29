@@ -1,0 +1,18 @@
+# Web framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Audio processing dependencies
+audio-separator==0.17.4
+yt-dlp
+onnxruntime>=1.16.0  # Required by audio-separator
+soundfile>=0.12.1    # For in-memory audio processing
+
+# Core utilities
+pydantic==2.5.0
+python-dotenv==1.0.0
+aiofiles==23.2.0
+
+# HTTP client for testing
+httpx==0.25.2

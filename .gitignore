@@ -178,6 +178,13 @@ Thumbs.db
 ### Docker ###
 .env
 docker-compose.override.yml
+venv/
+env/
+.venv/
+.env/
+ENV/
+env.bak/
+venv.bak/
 
 ### Environment variables ###
 .env.local
