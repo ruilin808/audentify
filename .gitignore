@@ -3,6 +3,10 @@ target/
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
+microservices/vocalremoval/temp/
+microservices/vocalremoval/output/
+microservices/audiofingerprinting/build/
+microservices/audiofingerprinting/src/samples
 
 ### Maven ###
 pom.xml.tag
@@ -117,6 +121,7 @@ DerivedData/
 ### Core dumps ###
 core
 *.core
+!core/
 
 ### Valgrind ###
 *.memcheck
