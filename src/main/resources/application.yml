@@ -1,0 +1,23 @@
+# application.yml
+server:
+  port: 8090
+
+# Microservice URLs
+microservice1:
+  url: http://localhost:8000
+
+microservice2:
+  url: http://localhost:8080
+
+# File upload settings
+spring:
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 200MB
+      
+# HTTP client timeouts
+http:
+  timeout:
+    connection: 30000
+    read: 300000  # 5 minutes for video processing

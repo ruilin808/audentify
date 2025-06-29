@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audentify - Music Recognition</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #f0f6fc;
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding: 40px 0;
+        }
+        
+        .title {
+            font-size: 3rem;
+            font-weight: 300;
+            color: #1db954;
+            margin-bottom: 12px;
+            letter-spacing: -1px;
+        }
+        
+        .subtitle {
+            color: #8b949e;
+            font-size: 1.2rem;
+            font-weight: 300;
+        }
+        
+        .search-section {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 16px;
+            padding: 40px;
+            margin-bottom: 40px;
+            text-align: center;
+        }
+        
+        .search-title {
+            font-size: 1.4rem;
+            color: #f0f6fc;
+            margin-bottom: 20px;
+            font-weight: 500;
+        }
+        
+        .search-form {
+            display: flex;
+            gap: 12px;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        
+        .search-input {
+            flex: 1;
+            padding: 16px 20px;
+            background: #0d1117;
+            border: 2px solid #30363d;
+            border-radius: 12px;
+            color: #f0f6fc;
+            font-size: 1rem;
+            transition: border-color 0.2s ease;
+        }
+        
+        .search-input:focus {
+            outline: none;
+            border-color: #1db954;
+        }
+        
+        .search-input::placeholder {
+            color: #6e7681;
+        }
+        
+        .search-button {
+            padding: 16px 24px;
+            background: #1db954;
+            color: white;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: all 0.2s ease;
+            min-width: 120px;
+        }
+        
+        .search-button:hover:not(:disabled) {
+            background: #1ed760;
+            transform: translateY(-1px);
+        }
+        
+        .search-button:disabled {
+            background: #6e7681;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 40px;
+            color: #8b949e;
+        }
+        
+        .loading.show {
+            display: block;
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            border: 3px solid #30363d;
+            border-radius: 50%;
+            border-top-color: #1db954;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 12px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .results-section {
+            display: none;
+        }
+        
+        .results-section.show {
+            display: block;
+        }
+        
+        .media-grid {
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+        
+        @media (max-width: 1000px) {
+            .media-grid {
+                grid-template-columns: 1fr;
+                gap: 20px;
+            }
+            
+            .search-form {
+                flex-direction: column;
+            }
+        }
+        
+        .album-section {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 30px;
+        }
+        
+        .album-header {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .album-cover {
+            width: 140px;
+            height: 140px;
+            border-radius: 8px;
+            object-fit: cover;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+        
+        .album-info {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        
+        .album-title {
+            font-size: 1.4rem;
+            font-weight: 600;
+            color: #f0f6fc;
+            margin-bottom: 8px;
+        }
+        
+        .album-artist {
+            font-size: 1.1rem;
+            color: #8b949e;
+            margin-bottom: 12px;
+        }
+        
+        .album-meta {
+            font-size: 0.9rem;
+            color: #6e7681;
+            margin-bottom: 16px;
+        }
+        
+        .spotify-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: #1db954;
+            color: white;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: background 0.2s ease;
+            width: fit-content;
+        }
+        
+        .spotify-link:hover {
+            background: #1ed760;
+        }
+        
+        .video-section {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 20px;
+            overflow: hidden;
+        }
+        
+        .section-title {
+            font-size: 1rem;
+            font-weight: 500;
+            color: #f0f6fc;
+            margin-bottom: 16px;
+        }
+        
+        .youtube-player-wrapper {
+            position: relative;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+            margin-bottom: 16px;
+            background: #000;
+        }
+        
+        .youtube-player {
+            width: 100%;
+            height: 315px;
+            border: none;
+            display: block;
+        }
+        
+        .video-title {
+            font-size: 0.95rem;
+            color: #f0f6fc;
+            margin-bottom: 8px;
+            line-height: 1.4;
+            font-weight: 500;
+        }
+        
+        .video-channel {
+            font-size: 0.85rem;
+            color: #8b949e;
+            margin-bottom: 12px;
+        }
+        
+        .youtube-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: #ff4444;
+            color: white;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+        
+        .youtube-link:hover {
+            background: #ff6666;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(255, 68, 68, 0.3);
+        }
+        
+        .tracks-section {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 25px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .tracks-section::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .tracks-section::-webkit-scrollbar-track {
+            background: #21262d;
+            border-radius: 3px;
+        }
+        
+        .tracks-section::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 3px;
+        }
+        
+        .tracks-section::-webkit-scrollbar-thumb:hover {
+            background: #484f58;
+        }
+        
+        .track-item {
+            display: flex;
+            align-items: flex-start;
+            padding: 10px 0;
+            border-bottom: 1px solid #21262d;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border-radius: 6px;
+        }
+        
+        .track-item:hover {
+            background: rgba(29, 185, 84, 0.06);
+            padding-left: 12px;
+        }
+        
+        .track-item:last-child {
+            border-bottom: none;
+        }
+        
+        .track-item.identified {
+            background: rgba(29, 185, 84, 0.1);
+            border: 1px solid rgba(29, 185, 84, 0.3);
+            padding: 12px 16px;
+            margin: 8px 0;
+            border-radius: 8px;
+        }
+        
+        .track-item.identified:hover {
+            background: rgba(29, 185, 84, 0.15);
+            padding-left: 16px;
+        }
+        
+        .track-item.now-playing {
+            background: rgba(29, 185, 84, 0.15);
+            border: 1px solid rgba(29, 185, 84, 0.5);
+            padding: 12px 16px;
+            margin: 8px 0;
+            border-radius: 8px;
+        }
+        
+        .track-item.now-playing:hover {
+            background: rgba(29, 185, 84, 0.2);
+            padding-left: 16px;
+        }
+        
+        .track-number {
+            width: 30px;
+            font-size: 0.9rem;
+            color: #6e7681;
+            font-weight: 500;
+            flex-shrink: 0;
+            padding-top: 2px;
+        }
+        
+        .track-details {
+            flex: 1;
+            margin-left: 16px;
+            min-width: 0;
+        }
+        
+        .track-name {
+            font-weight: 500;
+            color: #f0f6fc;
+            margin-bottom: 4px;
+            font-size: 0.95rem;
+            line-height: 1.3;
+        }
+        
+        .track-artists {
+            color: #8b949e;
+            font-size: 0.85rem;
+            line-height: 1.2;
+        }
+        
+        .track-duration {
+            color: #6e7681;
+            font-size: 0.85rem;
+            font-variant-numeric: tabular-nums;
+            flex-shrink: 0;
+            padding-top: 2px;
+        }
+        
+        .identified-badge {
+            color: #1db954;
+            font-weight: 600;
+            font-size: 0.8rem;
+            margin-left: 8px;
+        }
+        
+        .error-section {
+            display: none;
+            background: #2d1b1e;
+            border: 1px solid #5a2d2d;
+            border-radius: 12px;
+            padding: 30px;
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        
+        .error-section.show {
+            display: block;
+        }
+        
+        .error-title {
+            color: #ff6b6b;
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+        
+        .error-message {
+            color: #8b949e;
+            margin-bottom: 20px;
+        }
+        
+        .retry-button {
+            background: #ff6b6b;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        
+        .retry-button:hover {
+            background: #ff5252;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1 class="title">Audentify</h1>
+            <p class="subtitle">Discover music from any video link</p>
+        </div>
+        
+        <div class="search-section">
+            <h2 class="search-title">Enter a video URL to identify the music</h2>
+            <form class="search-form" id="searchForm">
+                <input 
+                    type="url" 
+                    class="search-input" 
+                    id="videoUrl"
+                    placeholder="https://www.youtube.com/watch?v=..." 
+                    required
+                >
+                <button type="submit" class="search-button" id="searchButton">
+                    Analyze
+                </button>
+            </form>
+        </div>
+        
+        <div class="loading" id="loadingSection">
+            <div class="spinner"></div>
+            Processing video and identifying music...
+        </div>
+        
+        <div class="error-section" id="errorSection">
+            <div class="error-title">Recognition Failed</div>
+            <div class="error-message" id="errorMessage"></div>
+            <button class="retry-button" onclick="hideError()">Try Again</button>
+        </div>
+        
+        <div class="results-section" id="resultsSection">
+            <div class="media-grid">
+                <div class="album-section">
+                    <div class="album-header" id="albumHeader">
+                        <!-- Album info will be populated here -->
+                    </div>
+                    
+                    <div class="tracks-section">
+                        <div id="tracksList">
+                            <!-- Tracks will be populated here -->
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="video-section">
+                    <h3 class="section-title">Original Video</h3>
+                    <div id="youtubeContainer">
+                        <!-- YouTube player will be embedded here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentPlayingTrack = null;
+        let currentAudio = null;
+        let currentTracksData = null;
+
+        // Form submission handler
+        document.getElementById('searchForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const videoUrl = document.getElementById('videoUrl').value.trim();
+            
+            if (!videoUrl) {
+                showError('Please enter a valid video URL');
+                return;
+            }
+            
+            await processVideoUrl(videoUrl);
+        });
+
+        async function processVideoUrl(videoUrl) {
+            showLoading();
+            hideError();
+            hideResults();
+            
+            try {
+                console.log('Processing video URL:', videoUrl);
+                
+                // Call your Spring Boot backend
+                const response = await fetch('/process', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url: videoUrl })
+                });
+                
+                const result = await response.json();
+                console.log('Backend response:', result);
+                
+                hideLoading();
+                
+                if (result.success && result.match) {
+                    displayResults(result, videoUrl);
+                } else {
+                    showError(result.message || result.error || 'No music could be identified in this video');
+                }
+                
+            } catch (error) {
+                console.error('Error processing video:', error);
+                hideLoading();
+                showError('Failed to process video. Please check the URL and try again.');
+            }
+        }
+
+        function displayResults(data, originalVideoUrl) {
+            // Store for track interactions
+            currentTracksData = data.spotify?.tracks || [];
+            
+            // Render album info
+            renderAlbumInfo(data);
+            
+            // Render video player
+            renderVideoPlayer(data, originalVideoUrl);
+            
+            // Render track list
+            renderTracksList(data.spotify?.tracks || [], data.title);
+            
+            showResults();
+        }
+
+        function renderAlbumInfo(data) {
+            const albumHeader = document.getElementById('albumHeader');
+            
+            if (data.spotify) {
+                albumHeader.innerHTML = `
+                    <img src="${data.spotify.albumImage || '/placeholder-album.png'}" 
+                         alt="${data.spotify.albumName}" 
+                         class="album-cover">
+                    <div class="album-info">
+                        <div class="album-title">${data.spotify.albumName}</div>
+                        <div class="album-artist">${data.artist}</div>
+                        <div class="album-meta">${data.spotify.releaseDate} • ${data.spotify.tracks?.length || 0} tracks</div>
+                        <a href="${data.spotify.albumUrl}" target="_blank" class="spotify-link">
+                            Open in Spotify
+                        </a>
+                    </div>
+                `;
+            } else {
+                albumHeader.innerHTML = `
+                    <div class="album-info">
+                        <div class="album-title">${data.album || 'Unknown Album'}</div>
+                        <div class="album-artist">${data.artist}</div>
+                        <div class="track-name">Identified: ${data.title}</div>
+                    </div>
+                `;
+            }
+        }
+
+        function renderVideoPlayer(data, originalVideoUrl) {
+            const youtubeContainer = document.getElementById('youtubeContainer');
+            
+            let videoId = '';
+            let videoTitle = 'Original Video';
+            
+            // Try to extract video ID from original URL or use YouTube data
+            if (data.youtube?.videoId) {
+                videoId = data.youtube.videoId;
+                videoTitle = data.youtube.title;
+            } else {
+                // Extract from original URL
+                const urlMatch = originalVideoUrl.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/);
+                if (urlMatch) {
+                    videoId = urlMatch[1];
+                }
+            }
+            
+            if (videoId) {
+                youtubeContainer.innerHTML = `
+                    <div class="youtube-player-wrapper">
+                        <iframe class="youtube-player"
+                                src="https://www.youtube.com/embed/${videoId}?enablejsapi=1&origin=${window.location.origin}"
+                                frameborder="0" 
+                                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+                                allowfullscreen>
+                        </iframe>
+                    </div>
+                    <div class="video-title">${videoTitle}</div>
+                    <div class="video-channel">${data.youtube?.channelTitle || ''}</div>
+                    <a href="${originalVideoUrl}" target="_blank" class="youtube-link">
+                        Watch on YouTube
+                    </a>
+                `;
+            } else {
+                youtubeContainer.innerHTML = `
+                    <div style="text-align: center; padding: 40px; color: #8b949e;">
+                        <p>Video player not available</p>
+                        <a href="${originalVideoUrl}" target="_blank" class="youtube-link">
+                            Watch Original Video
+                        </a>
+                    </div>
+                `;
+            }
+        }
+
+        function renderTracksList(tracks, identifiedTitle = '') {
+            const tracksList = document.getElementById('tracksList');
+            
+            if (!tracks || tracks.length === 0) {
+                tracksList.innerHTML = '<div style="text-align: center; color: #8b949e; padding: 20px;">No track information available</div>';
+                return;
+            }
+            
+            tracksList.innerHTML = tracks.map(track => {
+                const isIdentified = track.isIdentifiedTrack;
+                const isPlaying = currentPlayingTrack === track.trackId;
+                
+                let itemClass = 'track-item';
+                if (isIdentified && !isPlaying) itemClass += ' identified';
+                if (isPlaying) itemClass += ' now-playing';
+                
+                let statusBadge = '';
+                if (isIdentified && !isPlaying) statusBadge = '<span class="identified-badge">● IDENTIFIED</span>';
+                if (isPlaying) statusBadge = '<span class="identified-badge">♪ NOW PLAYING</span>';
+                
+                return `
+                    <div class="${itemClass}" onclick="playTrack('${track.url}', '${track.previewUrl || ''}', '${track.trackId}')">
+                        <div class="track-number">${track.trackNumber}</div>
+                        <div class="track-details">
+                            <div class="track-name">
+                                ${track.name}${statusBadge}
+                            </div>
+                            <div class="track-artists">${track.artists?.join(', ') || ''}</div>
+                        </div>
+                        <div class="track-duration">${track.durationFormatted || ''}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function playTrack(trackUrl, previewUrl = null, trackId = null) {
+            // Update the currently playing track
+            currentPlayingTrack = trackId;
+            
+            // Re-render the tracks list to update highlighting
+            if (currentTracksData) {
+                renderTracksList(currentTracksData);
+            }
+            
+            // Play preview if available
+            if (previewUrl) {
+                // Stop any currently playing preview
+                if (currentAudio) {
+                    currentAudio.pause();
+                }
+                
+                // Play new preview
+                currentAudio = new Audio(previewUrl);
+                currentAudio.volume = 0.7;
+                currentAudio.play().catch(e => {
+                    console.log('Preview playback failed:', e);
+                    alert('Preview not available for this track');
+                });
+                
+                // Show visual feedback
+                showPreviewFeedback();
+                
+                // Reset highlight when preview ends
+                currentAudio.addEventListener('ended', () => {
+                    currentPlayingTrack = null;
+                    if (currentTracksData) {
+                        renderTracksList(currentTracksData);
+                    }
+                });
+            } else {
+                // No preview available
+                alert('Preview not available for this track. Click the Spotify link to listen to the full song.');
+                currentPlayingTrack = null;
+                if (currentTracksData) {
+                    renderTracksList(currentTracksData);
+                }
+            }
+        }
+
+        function showPreviewFeedback() {
+            // Create temporary notification
+            const feedback = document.createElement('div');
+            feedback.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: #1db954;
+                color: white;
+                padding: 12px 20px;
+                border-radius: 25px;
+                font-size: 0.9rem;
+                font-weight: 500;
+                z-index: 1000;
+                box-shadow: 0 4px 12px rgba(29, 185, 84, 0.3);
+                animation: slideIn 0.3s ease;
+            `;
+            feedback.textContent = '🎵 Playing 30s preview';
+            
+            document.body.appendChild(feedback);
+            
+            // Remove after 3 seconds
+            setTimeout(() => {
+                feedback.style.animation = 'slideOut 0.3s ease';
+                setTimeout(() => feedback.remove(), 300);
+            }, 3000);
+        }
+
+        // UI state management
+        function showLoading() {
+            document.getElementById('loadingSection').classList.add('show');
+            document.getElementById('searchButton').disabled = true;
+            document.getElementById('searchButton').textContent = 'Processing...';
+        }
+
+        function hideLoading() {
+            document.getElementById('loadingSection').classList.remove('show');
+            document.getElementById('searchButton').disabled = false;
+            document.getElementById('searchButton').textContent = 'Analyze';
+        }
+
+        function showResults() {
+            document.getElementById('resultsSection').classList.add('show');
+        }
+
+        function hideResults() {
+            document.getElementById('resultsSection').classList.remove('show');
+        }
+
+        function showError(message) {
+            document.getElementById('errorMessage').textContent = message;
+            document.getElementById('errorSection').classList.add('show');
+        }
+
+        function hideError() {
+            document.getElementById('errorSection').classList.remove('show');
+        }
+
+        // Add CSS animations
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes slideIn {
+                from { transform: translateX(100%); opacity: 0; }
+                to { transform: translateX(0); opacity: 1; }
+            }
+            @keyframes slideOut {
+                from { transform: translateX(0); opacity: 1; }
+                to { transform: translateX(100%); opacity: 0; }
+            }
+        `;
+        document.head.appendChild(style);
+    </script>
+</body>
+</html>
