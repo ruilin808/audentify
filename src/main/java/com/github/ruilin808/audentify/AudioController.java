@@ -24,30 +24,26 @@ public class AudioController {
             String url = request.get("url");
             System.out.println("Processing URL: " + url);
             
-            // Create full request with default parameters for microservice 1
-            Map<String, Object> fullRequest = new HashMap<>();
-            fullRequest.put("url", url);
-            fullRequest.put("output_format", "wav");
-            fullRequest.put("sample_rate", 44100);
-            fullRequest.put("keep_intermediate", false);
-            fullRequest.put("channels", 2);
+            // Create simplified request for the new endpoint
+            Map<String, Object> audioRequest = new HashMap<>();
+            audioRequest.put("url", url);
             
-            // Step 1: Get audio from microservice 1
-            System.out.println("Calling microservice 1...");
+            // Step 1: Get processed audio from microservice 1 using advanced vocal preservation
+            System.out.println("Calling microservice 1 - removing speech while preserving vocals...");
             HttpHeaders headers1 = new HttpHeaders();
             headers1.setContentType(MediaType.APPLICATION_JSON);
-            HttpEntity<Map<String, Object>> entity1 = new HttpEntity<>(fullRequest, headers1);
+            HttpEntity<Map<String, Object>> entity1 = new HttpEntity<>(audioRequest, headers1);
             
             byte[] audioBytes = restTemplate.postForObject(
-                "http://localhost:8000/process-url/stream", 
+                "http://localhost:8000/remove-speech-preserve-vocals", 
                 entity1, 
                 byte[].class
             );
             
-            System.out.println("Got audio bytes: " + (audioBytes != null ? audioBytes.length : "null"));
+            System.out.println("Got processed audio bytes: " + (audioBytes != null ? audioBytes.length : "null"));
             
-            // Step 2: Send to microservice 2 for recognition
-            System.out.println("Calling microservice 2...");
+            // Step 2: Send processed audio to microservice 2 for recognition
+            System.out.println("Calling microservice 2 for audio recognition...");
             HttpHeaders headers2 = new HttpHeaders();
             headers2.setContentType(MediaType.parseMediaType("audio/wav"));
             HttpEntity<byte[]> entity2 = new HttpEntity<>(audioBytes, headers2);
@@ -67,6 +63,99 @@ public class AudioController {
             
             Map<String, Object> errorResponse = new HashMap<>();
             errorResponse.put("error", "Processing failed");
+            errorResponse.put("message", e.getMessage());
+            errorResponse.put("success", false);
+            return errorResponse;
+        }
+    }
+    
+    // Optional: Add additional endpoints for other processing methods
+    @PostMapping("/process/instrumental")
+    public Map processInstrumental(@RequestBody Map<String, String> request) {
+        try {
+            String url = request.get("url");
+            System.out.println("Extracting instrumental from URL: " + url);
+            
+            Map<String, Object> audioRequest = new HashMap<>();
+            audioRequest.put("url", url);
+            
+            HttpHeaders headers1 = new HttpHeaders();
+            headers1.setContentType(MediaType.APPLICATION_JSON);
+            HttpEntity<Map<String, Object>> entity1 = new HttpEntity<>(audioRequest, headers1);
+            
+            byte[] audioBytes = restTemplate.postForObject(
+                "http://localhost:8000/extract-instrumental", 
+                entity1, 
+                byte[].class
+            );
+            
+            System.out.println("Got instrumental audio bytes: " + (audioBytes != null ? audioBytes.length : "null"));
+            
+            HttpHeaders headers2 = new HttpHeaders();
+            headers2.setContentType(MediaType.parseMediaType("audio/wav"));
+            HttpEntity<byte[]> entity2 = new HttpEntity<>(audioBytes, headers2);
+            
+            Map result = restTemplate.postForObject(
+                "http://localhost:8080/recognize/stream", 
+                entity2, 
+                Map.class
+            );
+            
+            System.out.println("Instrumental recognition result: " + result);
+            return result;
+            
+        } catch (Exception e) {
+            System.err.println("Error in instrumental processing: " + e.getMessage());
+            e.printStackTrace();
+            
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("error", "Instrumental processing failed");
+            errorResponse.put("message", e.getMessage());
+            errorResponse.put("success", false);
+            return errorResponse;
+        }
+    }
+    
+    @PostMapping("/process/simple")
+    public Map processSimple(@RequestBody Map<String, String> request) {
+        try {
+            String url = request.get("url");
+            System.out.println("Simple speech removal from URL: " + url);
+            
+            Map<String, Object> audioRequest = new HashMap<>();
+            audioRequest.put("url", url);
+            
+            HttpHeaders headers1 = new HttpHeaders();
+            headers1.setContentType(MediaType.APPLICATION_JSON);
+            HttpEntity<Map<String, Object>> entity1 = new HttpEntity<>(audioRequest, headers1);
+            
+            byte[] audioBytes = restTemplate.postForObject(
+                "http://localhost:8000/remove-commentary", 
+                entity1, 
+                byte[].class
+            );
+            
+            System.out.println("Got simple processed audio bytes: " + (audioBytes != null ? audioBytes.length : "null"));
+            
+            HttpHeaders headers2 = new HttpHeaders();
+            headers2.setContentType(MediaType.parseMediaType("audio/wav"));
+            HttpEntity<byte[]> entity2 = new HttpEntity<>(audioBytes, headers2);
+            
+            Map result = restTemplate.postForObject(
+                "http://localhost:8080/recognize/stream", 
+                entity2, 
+                Map.class
+            );
+            
+            System.out.println("Simple processing result: " + result);
+            return result;
+            
+        } catch (Exception e) {
+            System.err.println("Error in simple processing: " + e.getMessage());
+            e.printStackTrace();
+            
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("error", "Simple processing failed");
             errorResponse.put("message", e.getMessage());
             errorResponse.put("success", false);
             return errorResponse;
