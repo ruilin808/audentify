@@ -9,13 +9,11 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import uuid
-import time
 import asyncio
 import logging
 import io
 import tempfile
 import shutil
-import numpy as np
 import gc
 import torch
 from pathlib import Path
@@ -27,7 +25,6 @@ import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
 from tqdm import tqdm
 
 # Import your existing models
@@ -35,7 +32,6 @@ from app.models import ProcessUrlRequest, HealthResponse
 
 # --- Enhanced Model Registry ---
 MODEL_REGISTRY = {
-    # Speech detection models
     "UVR-DeEcho-DeReverb.pth": {
         "url": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-DeEcho-DeReverb.pth",
         "primary_stem": "DeEcho",
@@ -48,28 +44,19 @@ MODEL_REGISTRY = {
         "model_type": "mdx_net",
         "description": "High-quality vocal isolation"
     },
-    "UVR_MDXNET_KARA_2.onnx": {
-        "url": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR_MDXNET_KARA_2.onnx",
-        "primary_stem": "Vocals",
-        "model_type": "mdx_net",
-        "description": "ONNX model for vocal separation"
-    },
     "Kim_Vocal_2.onnx": {
         "url": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx",
         "primary_stem": "Vocals",
         "model_type": "mdx_net",
         "description": "Kim's vocal model - good for speech vs singing distinction"
     },
-    # Alternative TikTok-style model from GitHub releases
     "3_HP-Vocal-UVR.pth": {
         "url": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/3_HP-Vocal-UVR.pth",
         "primary_stem": "Vocals",
         "model_type": "vr_arch",
-        "description": "High-performance vocal separation (alternative to TikTok model)"
+        "description": "High-performance vocal separation"
     }
 }
-
-# --- Enhanced Service Class ---
 
 class EnhancedAudioSeparatorService:
     _model_cache: Dict[str, Any] = {}
@@ -95,16 +82,44 @@ class EnhancedAudioSeparatorService:
         logging.basicConfig(level=self.log_level_int)
         
         self.executor = ThreadPoolExecutor(max_workers=4)
+        self.memory_threshold_gb = 6.0
+        self.check_memory_optimization()
+        
         self.logger.info("Enhanced Audio Separator Service initialized.")
 
+    def check_memory_optimization(self):
+        """Check if memory optimization is needed"""
+        if torch.cuda.is_available():
+            device_props = torch.cuda.get_device_properties(0)
+            total_memory_gb = device_props.total_memory / 1024**3
+            allocated_gb = torch.cuda.memory_allocated() / 1024**3
+            available_gb = total_memory_gb - allocated_gb
+            
+            self.use_memory_optimization = available_gb < self.memory_threshold_gb
+            
+            self.logger.info(f"GPU Memory: Total={total_memory_gb:.1f}GB, Available={available_gb:.1f}GB")
+            self.logger.info(f"Memory Optimization: {'ENABLED' if self.use_memory_optimization else 'DISABLED'}")
+        else:
+            self.use_memory_optimization = False
+            self.logger.info("CUDA not available - using CPU mode")
+
+    def get_available_memory_gb(self):
+        """Get current available GPU memory"""
+        if torch.cuda.is_available():
+            device_props = torch.cuda.get_device_properties(0)
+            total_memory_gb = device_props.total_memory / 1024**3
+            allocated_gb = torch.cuda.memory_allocated() / 1024**3
+            return total_memory_gb - allocated_gb
+        return float('inf')
+
     def _clear_gpu_memory(self):
-        """Aggressively clear GPU memory cache"""
+        """Clear GPU memory"""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()  # Clear inter-process communication cache
+            torch.cuda.ipc_collect()
             torch.cuda.synchronize()
         gc.collect()
-        self.logger.info("GPU memory aggressively cleared")
+        self.logger.info("GPU memory cleared")
 
     def _force_garbage_collection(self):
         """Force comprehensive garbage collection"""
@@ -112,37 +127,27 @@ class EnhancedAudioSeparatorService:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
-            # Force PyTorch to release unused memory
             for i in range(torch.cuda.device_count()):
                 with torch.cuda.device(i):
                     torch.cuda.empty_cache()
-        # Force Python garbage collection multiple times
         for _ in range(3):
             gc.collect()
 
     def _log_gpu_memory(self, step: str):
-        """Log current GPU memory usage"""
+        """Log GPU memory usage"""
         if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1024**3  # GB
-            cached = torch.cuda.memory_reserved() / 1024**3     # GB
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            cached = torch.cuda.memory_reserved() / 1024**3
             self.logger.info(f"{step} - GPU Memory: {allocated:.2f}GB allocated, {cached:.2f}GB cached")
 
     async def _ensure_model_exists(self, model_name: str, url: str):
-        """Download model if it doesn't exist locally with better error handling"""
+        """Download model if needed"""
         model_path = os.path.join(self.model_dir, model_name)
         if os.path.exists(model_path):
-            self.logger.info(f"Model '{model_name}' already exists locally.")
             return
 
-        self.logger.info(f"Downloading model '{model_name}' from {url}...")
-        
         def _download():
             try:
-                # Test if URL is accessible first
-                test_response = requests.head(url, timeout=10)
-                if test_response.status_code not in [200, 302]:
-                    raise requests.exceptions.HTTPError(f"Model not accessible: HTTP {test_response.status_code}")
-                
                 with requests.get(url, stream=True, timeout=30) as r:
                     r.raise_for_status()
                     total_size = int(r.headers.get('content-length', 0))
@@ -153,28 +158,32 @@ class EnhancedAudioSeparatorService:
                             f.write(chunk)
                             bar.update(len(chunk))
                 self.logger.info(f"Model '{model_name}' downloaded successfully.")
-            except requests.exceptions.HTTPError as e:
-                error_msg = f"Failed to download {model_name}: HTTP Error {e}"
-                self.logger.error(error_msg)
-                if os.path.exists(model_path):
-                    os.remove(model_path)
-                raise RuntimeError(error_msg)
             except Exception as e:
-                error_msg = f"Failed to download {model_name}: {e}"
-                self.logger.error(error_msg)
                 if os.path.exists(model_path):
                     os.remove(model_path)
-                raise RuntimeError(error_msg)
+                raise RuntimeError(f"Failed to download {model_name}: {e}")
 
         await asyncio.get_event_loop().run_in_executor(self.executor, _download)
 
     async def get_or_load_model(self, model_name: str, force_reload: bool = False):
-        """Load model with aggressive memory management - only one model at a time"""
+        """Load model with dynamic memory management"""
+        available_memory = self.get_available_memory_gb()
+        needs_optimization = available_memory < self.memory_threshold_gb
         
-        # Always clear all models except the one we want to keep memory minimal
+        if needs_optimization and not self.use_memory_optimization:
+            self.logger.warning(f"Available memory ({available_memory:.1f}GB) below threshold")
+            self.use_memory_optimization = True
+        
+        if self.use_memory_optimization or needs_optimization:
+            return await self._get_model_memory_optimized(model_name, force_reload)
+        else:
+            return await self._get_model_normal(model_name, force_reload)
+
+    async def _get_model_memory_optimized(self, model_name: str, force_reload: bool = False):
+        """Memory-optimized model loading"""
         if len(self._model_cache) > 0:
             if model_name not in self._model_cache or force_reload:
-                self.logger.info("Clearing all cached models to free memory...")
+                self.logger.info("Clearing all cached models...")
                 self._model_cache.clear()
                 self._force_garbage_collection()
 
@@ -185,11 +194,9 @@ class EnhancedAudioSeparatorService:
             if not force_reload and model_name in self._model_cache:
                 return self._model_cache[model_name]
 
-            self._log_gpu_memory(f"Before loading {model_name}")
-
             model_info = MODEL_REGISTRY.get(model_name)
             if not model_info:
-                raise ValueError(f"Model '{model_name}' not defined in MODEL_REGISTRY.")
+                raise ValueError(f"Model '{model_name}' not found in registry")
             
             await self._ensure_model_exists(model_name, model_info["url"])
 
@@ -201,80 +208,142 @@ class EnhancedAudioSeparatorService:
                 separator.load_model(model_filename=model_name)
                 return separator
             
-            self.logger.info(f"Loading model '{model_name}' (memory optimized)...")
+            self.logger.info(f"Loading model '{model_name}' (optimized)")
             separator_instance = await asyncio.get_event_loop().run_in_executor(self.executor, _load)
             
-            # Only keep this one model in cache
             self._model_cache = {model_name: separator_instance}
-            self.logger.info(f"Model '{model_name}' loaded. Cache size: 1")
+            self.logger.info(f"Model '{model_name}' loaded")
             
-            self._log_gpu_memory(f"After loading {model_name}")
+            return separator_instance
+
+    async def _get_model_normal(self, model_name: str, force_reload: bool = False):
+        """Normal model loading with caching"""
+        if not force_reload and model_name in self._model_cache:
+            return self._model_cache[model_name]
+
+        async with self._model_lock:
+            if not force_reload and model_name in self._model_cache:
+                return self._model_cache[model_name]
+
+            self._clear_gpu_memory()
+
+            model_info = MODEL_REGISTRY.get(model_name)
+            if not model_info:
+                raise ValueError(f"Model '{model_name}' not found in registry")
+            
+            await self._ensure_model_exists(model_name, model_info["url"])
+
+            def _load():
+                separator = self.Separator(
+                    log_level=self.log_level_int, 
+                    model_file_dir=self.model_dir
+                )
+                separator.load_model(model_filename=model_name)
+                return separator
+            
+            self.logger.info(f"Loading model '{model_name}' (normal)")
+            separator_instance = await asyncio.get_event_loop().run_in_executor(self.executor, _load)
+            
+            self._model_cache[model_name] = separator_instance
+            self.logger.info(f"Model '{model_name}' loaded. Cache size: {len(self._model_cache)}")
             
             return separator_instance
 
     async def process_url_advanced(self, url: str, method: str = "preserve_vocals") -> Tuple[bytes, str]:
-        """
-        Process URL with advanced speech removal while preserving vocals
-        
-        Args:
-            url: Video URL to process
-            method: Processing method - "preserve_vocals", "instrumental_only", or "simple"
-        
-        Returns:
-            Tuple of (wav_bytes, filename)
-        """
+        """Process URL with memory management"""
         task_id = str(uuid.uuid4())[:8]
         download_dir = os.path.join(self.temp_dir_base, task_id)
         
         try:
-            # Force aggressive memory cleanup at start
-            self._force_garbage_collection()
-            self._log_gpu_memory("Process start")
+            available_memory = self.get_available_memory_gb()
+            self.logger.info(f"Available GPU memory: {available_memory:.1f}GB")
             
-            # Download audio
+            if available_memory < self.memory_threshold_gb:
+                self._force_garbage_collection()
+            else:
+                self._clear_gpu_memory()
+            
             audio_file = await self._download_audio(url, download_dir)
             
             if method == "preserve_vocals":
-                wav_bytes = await self._preserve_vocals_remove_speech_optimized(audio_file, task_id)
+                if self.use_memory_optimization or available_memory < self.memory_threshold_gb:
+                    self.logger.info("Using memory-optimized vocal preservation")
+                    wav_bytes = await self._preserve_vocals_optimized(audio_file, task_id)
+                else:
+                    self.logger.info("Using full-quality vocal preservation")
+                    wav_bytes = await self._preserve_vocals_full(audio_file, task_id)
                 filename = f"vocals_preserved_{task_id}.wav"
             elif method == "instrumental_only":
                 wav_bytes = await self._extract_instrumental(audio_file, task_id)
                 filename = f"instrumental_{task_id}.wav"
-            else:  # simple method
+            else:
                 wav_bytes = await self._simple_speech_removal(audio_file, task_id)
                 filename = f"speech_removed_{task_id}.wav"
             
             return wav_bytes, filename
             
         finally:
-            # Always clear memory and cleanup files
-            self._force_garbage_collection()
+            if self.use_memory_optimization:
+                self._force_garbage_collection()
+            else:
+                self._clear_gpu_memory()
             if os.path.exists(download_dir):
                 shutil.rmtree(download_dir, ignore_errors=True)
 
-    async def _preserve_vocals_remove_speech_optimized(self, audio_file: str, task_id: str) -> bytes:
-        """
-        Memory-optimized vocal preservation - uses single model approach to avoid OOM
-        """
-        self.logger.info("Starting memory-optimized vocal preservation process...")
+    async def _preserve_vocals_full(self, audio_file: str, task_id: str) -> bytes:
+        """Full-quality vocal preservation (4-model pipeline)"""
+        self.logger.info("Starting full-quality vocal preservation...")
         
         try:
-            # Strategy: Use only the best single model instead of complex pipeline
-            # This gives 80% of the quality with 25% of the memory usage
+            # Step 1: Separate vocals from instrumentals
+            vocals_separator = await self.get_or_load_model("5_HP-Karaoke-UVR.pth")
+            vocals_file, instrumental_file = await self._separate_vocals_instrumental(
+                vocals_separator, audio_file, task_id
+            )
             
-            self.logger.info("Using single-model approach for memory optimization...")
-            self._force_garbage_collection()
+            # Step 2: Separate speech from singing in vocals
+            kim_separator = await self.get_or_load_model("Kim_Vocal_2.onnx")
+            singing_vocals, _ = await self._separate_singing_speech(
+                kim_separator, vocals_file, task_id
+            )
             
-            # Use Kim's model as it's best at distinguishing speech from singing
-            kim_separator = await self.get_or_load_model("Kim_Vocal_2.onnx", force_reload=True)
+            # Step 3: Combine singing with instrumental
+            final_audio = await self._combine_audio_files(
+                [singing_vocals, instrumental_file], task_id
+            )
+            
+            # Step 4: Apply cleanup
+            deecho_separator = await self.get_or_load_model("UVR-DeEcho-DeReverb.pth")
+            cleaned_audio = await self._apply_cleanup(deecho_separator, final_audio, task_id)
+            
+            with open(cleaned_audio, 'rb') as f:
+                return f.read()
+                
+        except Exception as e:
+            self.logger.error(f"Error in full pipeline: {e}")
+            
+            if "CUDA" in str(e) and "memory" in str(e).lower():
+                self.logger.warning("Memory error, falling back to optimized method")
+                self.use_memory_optimization = True
+                return await self._preserve_vocals_optimized(audio_file, task_id)
+            else:
+                raise
+
+    async def _preserve_vocals_optimized(self, audio_file: str, task_id: str) -> bytes:
+        """Memory-optimized vocal preservation (single model)"""
+        self.logger.info("Starting optimized vocal preservation...")
+        
+        try:
+            if self.use_memory_optimization:
+                self._force_garbage_collection()
+            
+            kim_separator = await self.get_or_load_model("Kim_Vocal_2.onnx", force_reload=self.use_memory_optimization)
             
             def _separate():
                 with tempfile.TemporaryDirectory() as temp_output_dir:
                     kim_separator.output_dir = temp_output_dir
                     output_files = kim_separator.separate(audio_file)
                     
-                    # Kim's model should separate speech from music/vocals
-                    # Take the output that preserves music and singing
                     target_file = None
                     for f in output_files:
                         file_name = Path(f).name
@@ -283,37 +352,33 @@ class EnhancedAudioSeparatorService:
                             break
                     
                     if not target_file:
-                        # Fallback to first output
                         target_file = output_files[0] if output_files else None
                     
                     if not target_file:
-                        raise RuntimeError("Could not generate vocal-preserved audio")
+                        raise RuntimeError("Could not generate audio")
                     
                     with open(target_file, 'rb') as f:
                         return f.read()
             
             result = await asyncio.get_event_loop().run_in_executor(self.executor, _separate)
-            self._force_garbage_collection()
             
-            self.logger.info("Memory-optimized vocal preservation completed successfully")
+            if self.use_memory_optimization:
+                self._force_garbage_collection()
+            
             return result
                 
         except Exception as e:
-            self.logger.error(f"Error in optimized vocal preservation: {e}")
-            self._force_garbage_collection()
+            self.logger.error(f"Error in optimized preservation: {e}")
+            if self.use_memory_optimization:
+                self._force_garbage_collection()
             
             if "CUDA" in str(e) and "memory" in str(e).lower():
-                self.logger.warning("CUDA memory error, falling back to simple method...")
                 return await self._simple_speech_removal(audio_file, task_id)
-            elif "404" in str(e) or "401" in str(e) or "Client Error" in str(e):
-                self.logger.warning("Model download error, falling back to karaoke model...")
-                separator = await self.get_or_load_model("5_HP-Karaoke-UVR.pth", force_reload=True)
-                return await self._extract_instrumental_with_separator(separator, audio_file, task_id)
             else:
                 raise
 
     async def _extract_instrumental_with_separator(self, separator, audio_file: str, task_id: str) -> bytes:
-        """Extract instrumental using provided separator"""
+        """Extract instrumental using separator"""
         def _separate():
             with tempfile.TemporaryDirectory() as temp_output_dir:
                 separator.output_dir = temp_output_dir
@@ -323,7 +388,8 @@ class EnhancedAudioSeparatorService:
                     return f.read()
         
         result = await asyncio.get_event_loop().run_in_executor(self.executor, _separate)
-        self._force_garbage_collection()
+        if self.use_memory_optimization:
+            self._force_garbage_collection()
         return result
 
     async def _separate_vocals_instrumental(self, separator, audio_file: str, task_id: str) -> Tuple[str, str]:
@@ -339,7 +405,6 @@ class EnhancedAudioSeparatorService:
                 if not vocals_file or not instrumental_file:
                     raise RuntimeError("Could not separate vocals and instrumental")
                 
-                # Copy to task directory for later use
                 task_dir = os.path.join(self.temp_dir_base, task_id)
                 os.makedirs(task_dir, exist_ok=True)
                 
@@ -354,13 +419,12 @@ class EnhancedAudioSeparatorService:
         return await asyncio.get_event_loop().run_in_executor(self.executor, _separate)
 
     async def _separate_singing_speech(self, separator, vocals_file: str, task_id: str) -> Tuple[str, str]:
-        """Separate singing from speech in vocals"""
+        """Separate singing from speech"""
         def _separate():
             with tempfile.TemporaryDirectory() as temp_output_dir:
                 separator.output_dir = temp_output_dir
                 output_files = separator.separate(vocals_file)
                 
-                # Kim's model outputs might be different - adapt based on actual output
                 primary_file = next((f for f in output_files if '(Vocals)' in Path(f).name), output_files[0])
                 secondary_file = next((f for f in output_files if '(Instrumental)' in Path(f).name), output_files[1] if len(output_files) > 1 else None)
                 
@@ -394,20 +458,16 @@ class EnhancedAudioSeparatorService:
                         combined_audio = audio
                         sample_rate = sr
                     else:
-                        # Ensure same sample rate
                         if sr != sample_rate:
-                            # Simple resampling - you might want to use librosa for better quality
                             audio = np.interp(
                                 np.linspace(0, len(audio), int(len(audio) * sample_rate / sr)),
                                 np.arange(len(audio)),
                                 audio
                             )
                         
-                        # Ensure same length
                         min_len = min(len(combined_audio), len(audio))
                         combined_audio = combined_audio[:min_len] + audio[:min_len]
             
-            # Save combined audio
             task_dir = os.path.join(self.temp_dir_base, task_id)
             combined_file = os.path.join(task_dir, "combined.wav")
             sf.write(combined_file, combined_audio, sample_rate)
@@ -417,13 +477,12 @@ class EnhancedAudioSeparatorService:
         return await asyncio.get_event_loop().run_in_executor(self.executor, _combine)
 
     async def _apply_cleanup(self, separator, audio_file: str, task_id: str) -> str:
-        """Apply final cleanup to remove echo/reverb"""
+        """Apply cleanup"""
         def _cleanup():
             with tempfile.TemporaryDirectory() as temp_output_dir:
                 separator.output_dir = temp_output_dir
                 output_files = separator.separate(audio_file)
                 
-                # Return the cleaned file
                 cleaned_file = next((f for f in output_files if '(DeEcho)' in Path(f).name), output_files[0])
                 
                 task_dir = os.path.join(self.temp_dir_base, task_id)
@@ -435,19 +494,25 @@ class EnhancedAudioSeparatorService:
         return await asyncio.get_event_loop().run_in_executor(self.executor, _cleanup)
 
     async def _extract_instrumental(self, audio_file: str, task_id: str) -> bytes:
-        """Extract instrumental only (remove all vocals) - memory optimized"""
-        self._force_garbage_collection()
-        separator = await self.get_or_load_model("3_HP-Vocal-UVR.pth", force_reload=True)
+        """Extract instrumental"""
+        if self.use_memory_optimization:
+            self._force_garbage_collection()
+            separator = await self.get_or_load_model("3_HP-Vocal-UVR.pth", force_reload=True)
+        else:
+            separator = await self.get_or_load_model("5_HP-Karaoke-UVR.pth")
         return await self._extract_instrumental_with_separator(separator, audio_file, task_id)
 
     async def _simple_speech_removal(self, audio_file: str, task_id: str) -> bytes:
-        """Simple speech removal using alternative vocal separation model - memory optimized"""
-        self._force_garbage_collection()
-        separator = await self.get_or_load_model("3_HP-Vocal-UVR.pth", force_reload=True)
+        """Simple speech removal"""
+        if self.use_memory_optimization:
+            self._force_garbage_collection()
+            separator = await self.get_or_load_model("3_HP-Vocal-UVR.pth", force_reload=True)
+        else:
+            separator = await self.get_or_load_model("3_HP-Vocal-UVR.pth")
         return await self._extract_instrumental_with_separator(separator, audio_file, task_id)
 
     async def _download_audio(self, url: str, download_dir: str) -> str:
-        """Download audio from URL using your existing download config"""
+        """Download audio from URL"""
         def _download():
             os.makedirs(download_dir, exist_ok=True)
             ydl_opts = {
@@ -477,33 +542,34 @@ async def lifespan(app: FastAPI):
     global separator_service
     logging.info("API Lifespan: Startup.")
     
-    # Configure GPU memory management aggressively
     if torch.cuda.is_available():
-        # Set conservative memory fraction (70% instead of 90%)
-        torch.cuda.set_per_process_memory_fraction(0.7)
+        device_props = torch.cuda.get_device_properties(0)
+        total_memory_gb = device_props.total_memory / 1024**3
+        
+        if total_memory_gb >= 10:
+            memory_fraction = 0.85
+        elif total_memory_gb >= 8:
+            memory_fraction = 0.75
+        else:
+            memory_fraction = 0.7
+        
+        torch.cuda.set_per_process_memory_fraction(memory_fraction)
         torch.cuda.empty_cache()
         
-        logging.info(f"CUDA configured with conservative memory settings (70% allocation).")
-        
-        # Log initial memory state
-        total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        allocated = torch.cuda.memory_allocated() / 1024**3
-        logging.info(f"GPU Total Memory: {total_memory:.1f}GB, Currently Allocated: {allocated:.1f}GB")
+        logging.info(f"GPU configured: {total_memory_gb:.1f}GB total, {memory_fraction*100:.0f}% allocation")
     
     try:
         separator_service = EnhancedAudioSeparatorService(log_level="INFO")
-        logging.info("Service initialized for memory-optimized processing.")
+        logging.info("Service initialized with dynamic memory management.")
     except Exception as e:
         logging.critical(f"Fatal error during startup: {e}", exc_info=True)
         separator_service = None
     yield
     
-    # Aggressive cleanup on shutdown
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
     gc.collect()
-    logging.info("API Lifespan: Shutdown completed with memory cleanup.")
+    logging.info("API shutdown completed.")
 
 app = FastAPI(title="Enhanced Audio Separation API", version="4.0.0-enhanced", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
@@ -516,51 +582,9 @@ async def root():
         dependencies={
             "models_loaded": len(separator_service._model_cache) if separator_service else 0,
             "cuda_available": torch.cuda.is_available(),
-            "gpu_memory": f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB" if torch.cuda.is_available() else "N/A"
+            "memory_optimization": separator_service.use_memory_optimization if separator_service else False
         }
     )
-
-@app.get("/debug/models", tags=["Debug"])
-async def debug_models():
-    """Debug endpoint to check available models"""
-    if not separator_service:
-        raise HTTPException(status_code=503, detail="Service not available.")
-    
-    models_info = {}
-    for model_name, model_info in MODEL_REGISTRY.items():
-        model_path = os.path.join(separator_service.model_dir, model_name)
-        models_info[model_name] = {
-            "url": model_info["url"],
-            "exists_locally": os.path.exists(model_path),
-            "cached_in_memory": model_name in separator_service._model_cache,
-            "description": model_info["description"]
-        }
-    
-    return {
-        "model_registry": models_info,
-        "models_loaded_in_cache": len(separator_service._model_cache),
-        "temp_dir": separator_service.temp_dir_base,
-        "model_dir": separator_service.model_dir
-    }
-
-@app.post("/process-url/stream", tags=["Audio Separation"])
-async def process_url_stream(request: ProcessUrlRequest):
-    """Process URL and return streaming audio (legacy endpoint for backward compatibility)"""
-    if not separator_service:
-        raise HTTPException(status_code=503, detail="Service not available.")
-    try:
-        # Use preserve_vocals as default method for backward compatibility
-        wav_bytes, filename = await separator_service.process_url_advanced(
-            str(request.url), method="preserve_vocals"
-        )
-        return StreamingResponse(
-            io.BytesIO(wav_bytes), 
-            media_type="audio/wav",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
-        )
-    except Exception as e:
-        logging.error(f"Error processing request: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/remove-speech-preserve-vocals", tags=["Audio Separation"])
 async def remove_speech_preserve_vocals(request: ProcessUrlRequest):
@@ -582,7 +606,7 @@ async def remove_speech_preserve_vocals(request: ProcessUrlRequest):
 
 @app.post("/extract-instrumental", tags=["Audio Separation"])
 async def extract_instrumental(request: ProcessUrlRequest):
-    """Extract instrumental only (remove all vocals)"""
+    """Extract instrumental only"""
     if not separator_service:
         raise HTTPException(status_code=503, detail="Service not available.")
     try:
@@ -600,7 +624,7 @@ async def extract_instrumental(request: ProcessUrlRequest):
 
 @app.post("/remove-commentary", tags=["Audio Separation"])
 async def remove_commentary(request: ProcessUrlRequest):
-    """Simple speech removal (legacy endpoint)"""
+    """Simple speech removal"""
     if not separator_service:
         raise HTTPException(status_code=503, detail="Service not available.")
     try:

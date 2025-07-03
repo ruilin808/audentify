@@ -1,673 +1,782 @@
-separator.py
-"""
-Refactored Audio Separator class with async support for FastAPI
-"""
+#include <httplib.h>
+#include <fstream>
+#include <filesystem>
+#include <chrono>
+#include <thread>
+#include <fftw3.h>
+#include <nlohmann/json.hpp>
+#include <curl/curl.h>
+#include <regex>
 
-import os
-import sys
-import subprocess
-import logging
-import asyncio
-from pathlib import Path
-from typing import List, Optional, Dict, Callable
-import tempfile
-import json
-import time
-import uuid
-from concurrent.futures import ThreadPoolExecutor
+#include "../recognition/Recognition.h"
 
-# Import will be done at runtime to avoid startup failures
+using json = nlohmann::json;
 
+// Base64 encoding implementation
+static const std::string base64_chars = 
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789+/";
 
-class AsyncAudioSeparator:
-    """Async version of the Professional Audio Separator"""
+std::string base64_encode(std::string const& str) {
+    std::string ret;
+    int i = 0;
+    int j = 0;
+    unsigned char char_array_3[3];
+    unsigned char char_array_4[4];
+    const char* bytes_to_encode = str.c_str();
+    int in_len = str.length();
+
+    while (in_len--) {
+        char_array_3[i++] = *(bytes_to_encode++);
+        if (i == 3) {
+            char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+            char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+            char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+            char_array_4[3] = char_array_3[2] & 0x3f;
+
+            for(i = 0; (i <4) ; i++)
+                ret += base64_chars[char_array_4[i]];
+            i = 0;
+        }
+    }
+
+    if (i) {
+        for(j = i; j < 3; j++)
+            char_array_3[j] = '\0';
+
+        char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+        char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+        char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+        char_array_4[3] = char_array_3[2] & 0x3f;
+
+        for (j = 0; (j < i + 1); j++)
+            ret += base64_chars[char_array_4[j]];
+
+        while((i++ < 3))
+            ret += '=';
+    }
+
+    return ret;
+}
+
+// Struct to hold API credentials
+struct APICredentials {
+    std::string youtubeApiKey;
+    std::string spotifyClientId;
+    std::string spotifyClientSecret;
+    std::string spotifyAccessToken;
+    std::chrono::system_clock::time_point spotifyTokenExpiry;
+};
+
+// Helper struct for HTTP responses
+struct HTTPResponse {
+    std::string data;
+    long responseCode;
     
-    def __init__(self, 
-                 output_dir: str = None,
-                 temp_dir: str = None,
-                 output_format: str = "wav",
-                 sample_rate: int = 44100,
-                 model_file_dir: str = None,
-                 log_level: str = "INFO",
-                 progress_callback: Optional[Callable] = None):
-        """
-        Initialize the Async Audio Separator
-        
-        Args:
-            output_dir: Directory to save output files
-            temp_dir: Directory for temporary files
-            output_format: Output audio format
-            sample_rate: Audio sample rate
-            model_file_dir: Directory to cache model files
-            log_level: Logging level
-            progress_callback: Optional callback for progress updates
-        """
-        # Import dependencies at runtime
-        try:
-            from audio_separator.separator import Separator
-            self.Separator = Separator
-        except ImportError:
-            raise ImportError("audio-separator library not found! Install with: pip install audio-separator")
-        
-        try:
-            import yt_dlp
-            # Test that yt_dlp actually works
-            _ = yt_dlp.YoutubeDL({'quiet': True})
-            self.yt_dlp = yt_dlp
-            if hasattr(self, 'logger'):
-                self.logger.info("yt-dlp imported successfully")
-        except Exception as e:
-            if hasattr(self, 'logger'):
-                self.logger.error(f"yt-dlp import/test failed: {e}")
-            raise ImportError(f"yt-dlp library not working! Error: {e}")  
-        
-        self.supported_video_formats = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v'}
-        self.supported_audio_formats = {'.wav', '.mp3', '.flac', '.aac', '.ogg', '.m4a', '.wma'}
-        
-        # Setup directories
-        self.output_dir = output_dir or os.path.join(os.getcwd(), "output")
-        self.temp_dir = temp_dir or os.path.join(os.getcwd(), "temp")
-        
-        # Create directories if they don't exist
-        os.makedirs(self.output_dir, exist_ok=True)
-        os.makedirs(self.temp_dir, exist_ok=True)
-        
-        # Setup logging
-        logging.basicConfig(
-            level=getattr(logging, log_level.upper()),
-            format='%(asctime)s - %(levelname)s - %(message)s'
-        )
-        self.logger = logging.getLogger(__name__)
-        
-        # Progress callback
-        self.progress_callback = progress_callback
-        
-        # Thread pool for CPU-intensive tasks
-        self.executor = ThreadPoolExecutor(max_workers=2)
-        
-        # Initialize separator with configuration
-        model_dir = model_file_dir or os.path.join(self.temp_dir, "models")
-        os.makedirs(model_dir, exist_ok=True)
-        
-        self.separator = self.Separator(
-            output_dir=self.output_dir,
-            output_format=output_format.upper(),
-            sample_rate=sample_rate,
-            model_file_dir=model_dir,
-            log_level=getattr(logging, log_level.upper()),
-            output_single_stem="Instrumental"  # Only output instrumental stem
-        )
-        
-        self.current_model = None
+    HTTPResponse() : responseCode(0) {}
+};
+
+// Callback function for CURL write data
+static size_t WriteCallback(void* contents, size_t size, size_t nmemb, HTTPResponse* response) {
+    size_t totalSize = size * nmemb;
+    response->data.append((char*)contents, totalSize);
+    return totalSize;
+}
+
+class AudioFingerprintingServer {
+private:
+    std::unique_ptr<AudioFingerprinting::SongRecognizer> recognizer;
+    std::string dbPath;
+    std::string tempDir;
+    APICredentials apiCreds;
     
-    def _update_progress(self, message: str, progress: float = None):
-        """Update progress via callback if available"""
-        if self.progress_callback:
-            self.progress_callback(message, progress)
-        self.logger.info(message)
-    
-    def is_url(self, input_string: str) -> bool:
-        """Check if input string is a URL"""
-        return input_string.startswith(('http://', 'https://', 'www.'))
-    
-    async def download_audio_ytdlp(self, url: str, task_id: str = None) -> str:
-        """
-        Download audio from URL using yt-dlp (async)
+    // Helper to save uploaded file temporarily
+    std::string saveUploadedFile(const std::string& fileData, const std::string& filename) {
+        if (!std::filesystem::exists(tempDir)) {
+            std::filesystem::create_directories(tempDir);
+        }
         
-        Args:
-            url: URL to download from
-            task_id: Optional task ID for file naming
+        auto now = std::chrono::system_clock::now();
+        auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        std::string tempFilename = tempDir + "/" + std::to_string(timestamp) + "_" + filename;
         
-        Returns:
-            Path to downloaded audio file
-        """
-        def _download():
-            try:
-                # Create task-specific temp directory
-                temp_subdir = os.path.join(self.temp_dir, task_id or str(uuid.uuid4())[:8])
-                os.makedirs(temp_subdir, exist_ok=True)
+        std::ofstream file(tempFilename, std::ios::binary);
+        if (!file) {
+            throw std::runtime_error("Failed to create temporary file");
+        }
+        
+        file.write(fileData.c_str(), fileData.size());
+        file.close();
+        
+        return tempFilename;
+    }
+    
+    void cleanupTempFile(const std::string& filepath) {
+        try {
+            if (std::filesystem::exists(filepath)) {
+                std::filesystem::remove(filepath);
+            }
+        } catch (...) {
+            // Ignore cleanup errors
+        }
+    }
+    
+    // HTTP request helper
+    HTTPResponse makeHTTPRequest(const std::string& url, const std::vector<std::string>& headers = {}, 
+                                const std::string& postData = "", const std::string& method = "GET") {
+        HTTPResponse response;
+        CURL* curl = curl_easy_init();
+        
+        if (!curl) {
+            response.responseCode = -1;
+            return response;
+        }
+        
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+        
+        // Set headers
+        struct curl_slist* headerList = nullptr;
+        for (const auto& header : headers) {
+            headerList = curl_slist_append(headerList, header.c_str());
+        }
+        if (headerList) {
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headerList);
+        }
+        
+        // Set POST data if provided
+        if (!postData.empty() && method == "POST") {
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postData.c_str());
+        }
+        
+        CURLcode res = curl_easy_perform(curl);
+        if (res == CURLE_OK) {
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.responseCode);
+        } else {
+            response.responseCode = -1;
+            std::cerr << "CURL error: " << curl_easy_strerror(res) << std::endl;
+        }
+        
+        if (headerList) {
+            curl_slist_free_all(headerList);
+        }
+        curl_easy_cleanup(curl);
+        
+        return response;
+    }
+    
+    // URL encode helper
+    std::string urlEncode(const std::string& str) {
+        CURL* curl = curl_easy_init();
+        if (!curl) return str;
+        
+        char* encoded = curl_easy_escape(curl, str.c_str(), str.length());
+        std::string result(encoded);
+        curl_free(encoded);
+        curl_easy_cleanup(curl);
+        
+        return result;
+    }
+    
+    // Spotify API methods
+    bool refreshSpotifyToken() {
+        if (apiCreds.spotifyClientId.empty() || apiCreds.spotifyClientSecret.empty()) {
+            std::cerr << "Spotify credentials not configured" << std::endl;
+            return false;
+        }
+        
+        std::string auth = apiCreds.spotifyClientId + ":" + apiCreds.spotifyClientSecret;
+        std::string encodedAuth = base64_encode(auth);
+        
+        std::vector<std::string> headers = {
+            "Authorization: Basic " + encodedAuth,
+            "Content-Type: application/x-www-form-urlencoded"
+        };
+        
+        std::string postData = "grant_type=client_credentials";
+        
+        HTTPResponse response = makeHTTPRequest("https://accounts.spotify.com/api/token", 
+                                              headers, postData, "POST");
+        
+        if (response.responseCode == 200) {
+            try {
+                json tokenResponse = json::parse(response.data);
+                apiCreds.spotifyAccessToken = tokenResponse["access_token"];
+                int expiresIn = tokenResponse["expires_in"];
+                apiCreds.spotifyTokenExpiry = std::chrono::system_clock::now() + 
+                                            std::chrono::seconds(expiresIn - 300); // 5 min buffer
+                std::cout << "Spotify token refreshed successfully" << std::endl;
+                return true;
+            } catch (const std::exception& e) {
+                std::cerr << "Failed to parse Spotify token response: " << e.what() << std::endl;
+                return false;
+            }
+        }
+        
+        std::cerr << "Failed to refresh Spotify token. HTTP " << response.responseCode << std::endl;
+        return false;
+    }
+    
+    bool ensureSpotifyToken() {
+        auto now = std::chrono::system_clock::now();
+        if (apiCreds.spotifyAccessToken.empty() || now >= apiCreds.spotifyTokenExpiry) {
+            return refreshSpotifyToken();
+        }
+        return true;
+    }
+    
+    json searchYouTubeVideo(const std::string& artist, const std::string& title) {
+        json result;
+        result["youtube"] = nullptr;
+        
+        if (apiCreds.youtubeApiKey.empty()) {
+            std::cout << "YouTube API key not configured, skipping video search" << std::endl;
+            return result;
+        }
+        
+        std::string query = urlEncode(artist + " " + title + " official");
+        std::string url = "https://www.googleapis.com/youtube/v3/search"
+                         "?part=snippet"
+                         "&type=video"
+                         "&videoCategoryId=10" // Music category
+                         "&maxResults=1"
+                         "&q=" + query +
+                         "&key=" + apiCreds.youtubeApiKey;
+        
+        HTTPResponse response = makeHTTPRequest(url);
+        
+        if (response.responseCode == 200) {
+            try {
+                json youtubeResponse = json::parse(response.data);
+                if (youtubeResponse.contains("items") && !youtubeResponse["items"].empty()) {
+                    auto item = youtubeResponse["items"][0];
+                    json youtubeInfo;
+                    youtubeInfo["videoId"] = item["id"]["videoId"];
+                    youtubeInfo["url"] = "https://www.youtube.com/watch?v=" + 
+                                        item["id"]["videoId"].get<std::string>();
+                    youtubeInfo["title"] = item["snippet"]["title"];
+                    youtubeInfo["channelTitle"] = item["snippet"]["channelTitle"];
+                    
+                    // Get high quality thumbnail
+                    if (item["snippet"]["thumbnails"].contains("high")) {
+                        youtubeInfo["thumbnail"] = item["snippet"]["thumbnails"]["high"]["url"];
+                    } else if (item["snippet"]["thumbnails"].contains("default")) {
+                        youtubeInfo["thumbnail"] = item["snippet"]["thumbnails"]["default"]["url"];
+                    }
+                    
+                    result["youtube"] = youtubeInfo;
+                    std::cout << "Found YouTube video: " << youtubeInfo["title"] << std::endl;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "YouTube API parsing error: " << e.what() << std::endl;
+            }
+        } else {
+            std::cerr << "YouTube API request failed. HTTP " << response.responseCode << std::endl;
+        }
+        
+        return result;
+    }
+    
+    json searchSpotifyAlbum(const std::string& artist, const std::string& album) {
+        json result;
+        result["spotify"] = nullptr;
+        
+        if (!ensureSpotifyToken()) {
+            return result;
+        }
+        
+        std::string query = urlEncode("artist:" + artist + " album:" + album);
+        std::string url = "https://api.spotify.com/v1/search?q=" + query + 
+                         "&type=album&limit=1";
+        
+        std::vector<std::string> headers = {
+            "Authorization: Bearer " + apiCreds.spotifyAccessToken
+        };
+        
+        HTTPResponse response = makeHTTPRequest(url, headers);
+        
+        if (response.responseCode == 200) {
+            try {
+                json spotifyResponse = json::parse(response.data);
+                if (spotifyResponse.contains("albums") && 
+                    spotifyResponse["albums"].contains("items") &&
+                    !spotifyResponse["albums"]["items"].empty()) {
+                    
+                    auto albumData = spotifyResponse["albums"]["items"][0];
+                    std::string albumId = albumData["id"];
+                    
+                    // Get album tracks
+                    json albumInfo = getSpotifyAlbumTracks(albumId);
+                    if (!albumInfo.is_null()) {
+                        albumInfo["albumUrl"] = albumData["external_urls"]["spotify"];
+                        albumInfo["albumId"] = albumId;
+                        albumInfo["albumName"] = albumData["name"];
+                        albumInfo["releaseDate"] = albumData["release_date"];
+                        
+                        // Get highest quality album image
+                        if (!albumData["images"].empty()) {
+                            albumInfo["albumImage"] = albumData["images"][0]["url"];
+                        }
+                        
+                        result["spotify"] = albumInfo;
+                        std::cout << "Found Spotify album: " << albumData["name"] << std::endl;
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Spotify API parsing error: " << e.what() << std::endl;
+            }
+        } else {
+            std::cerr << "Spotify album search failed. HTTP " << response.responseCode << std::endl;
+        }
+        
+        return result;
+    }
+    
+    json getSpotifyAlbumTracks(const std::string& albumId) {
+        if (!ensureSpotifyToken()) {
+            return nullptr;
+        }
+        
+        std::string url = "https://api.spotify.com/v1/albums/" + albumId + "/tracks";
+        
+        std::vector<std::string> headers = {
+            "Authorization: Bearer " + apiCreds.spotifyAccessToken
+        };
+        
+        HTTPResponse response = makeHTTPRequest(url, headers);
+        
+        if (response.responseCode == 200) {
+            try {
+                json tracksResponse = json::parse(response.data);
+                json albumTracks;
+                albumTracks["tracks"] = json::array();
                 
-                output_template = os.path.join(temp_subdir, 'audio.%(ext)s')
-                
-                self._update_progress(f"📥 Downloading audio from: {url}")
-                
-                # Configure yt-dlp options
-                ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'outtmpl': {
-                        'default': output_template,
-                    },
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'wav',
-                        'preferredquality': '0',  # Best quality
-                    }],
-                    'quiet': self.logger.level > logging.INFO,
-                    'no_warnings': self.logger.level > logging.WARNING,
-                    'extract_flat': False,
-                    'writethumbnail': False,
-                    'writeinfojson': False,
+                for (const auto& track : tracksResponse["items"]) {
+                    json trackInfo;
+                    trackInfo["name"] = track["name"];
+                    trackInfo["trackNumber"] = track["track_number"];
+                    trackInfo["duration"] = track["duration_ms"];
+                    trackInfo["url"] = track["external_urls"]["spotify"];
+                    trackInfo["trackId"] = track["id"];
+                    trackInfo["explicit"] = track["explicit"];
+                    
+                    // Add preview URL for 30-second samples
+                    if (track.contains("preview_url") && !track["preview_url"].is_null()) {
+                        trackInfo["previewUrl"] = track["preview_url"];
+                    } else {
+                        trackInfo["previewUrl"] = nullptr;
+                    }
+                    
+                    // Format duration for display
+                    int durationMs = track["duration_ms"];
+                    int minutes = durationMs / 60000;
+                    int seconds = (durationMs % 60000) / 1000;
+                    char formatted[10];
+                    sprintf(formatted, "%d:%02d", minutes, seconds);
+                    trackInfo["durationFormatted"] = formatted;
+                    
+                    // Artists array
+                    json artists = json::array();
+                    for (const auto& artist : track["artists"]) {
+                        artists.push_back(artist["name"]);
+                    }
+                    trackInfo["artists"] = artists;
+                    
+                    // Initialize as not identified
+                    trackInfo["isIdentifiedTrack"] = false;
+                    
+                    albumTracks["tracks"].push_back(trackInfo);
                 }
                 
-                downloaded_file = None
-                
-                # Download audio
-                with self.yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
-                    
-                    # Find the downloaded file
-                    temp_path = Path(temp_subdir)
-                    audio_extensions = ['.wav', '.mp3', '.m4a', '.webm', '.ogg', '.flac']
-                    
-                    for ext in audio_extensions:
-                        audio_files = list(temp_path.glob(f"*{ext}"))
-                        if audio_files:
-                            downloaded_file = str(audio_files[0])
-                            break
-                    
-                    if not downloaded_file:
-                        # Fallback: get any file that's not a directory
-                        all_files = [f for f in temp_path.iterdir() if f.is_file()]
-                        if all_files:
-                            downloaded_file = str(all_files[0])
-                        else:
-                            raise FileNotFoundError("No downloaded audio file found")
-                
-                if not downloaded_file or not os.path.exists(downloaded_file):
-                    raise FileNotFoundError("Downloaded audio file not found")
-                
-                self._update_progress(f"✅ Audio downloaded: {Path(downloaded_file).name}")
-                return downloaded_file
-                
-            except Exception as e:
-                self.logger.error(f"Download failed: {str(e)}")
-                raise RuntimeError(f"Failed to download audio from {url}: {e}")
+                return albumTracks;
+            } catch (const std::exception& e) {
+                std::cerr << "Spotify tracks parsing error: " << e.what() << std::endl;
+            }
+        } else {
+            std::cerr << "Spotify tracks request failed. HTTP " << response.responseCode << std::endl;
+        }
         
-        # Run download in thread pool
-        return await asyncio.get_event_loop().run_in_executor(self.executor, _download)
+        return nullptr;
+    }
     
-    async def check_ffmpeg(self) -> bool:
-        """Check if FFmpeg is available (async)"""
-        def _check():
-            try:
-                subprocess.run(['ffmpeg', '-version'], 
-                             stdout=subprocess.DEVNULL, 
-                             stderr=subprocess.DEVNULL, 
-                             check=True)
-                return True
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                return False
+    // Enhanced song info to JSON conversion
+    json songInfoToJson(const AudioFingerprinting::SongInfo& songInfo) {
+        json response;
+        response["success"] = !songInfo.songId.empty();
         
-        return await asyncio.get_event_loop().run_in_executor(self.executor, _check)
-    
-    async def extract_audio_ffmpeg(self, video_path: str, output_path: str = None, **kwargs) -> str:
-        """
-        Extract audio from video using FFmpeg (async)
-        """
-        def _extract():
-            video_file = Path(video_path)
-            if not video_file.exists():
-                raise FileNotFoundError(f"Video file not found: {video_path}")
+        if (!songInfo.songId.empty()) {
+            response["match"] = true;
+            response["artist"] = songInfo.artist;
+            response["album"] = songInfo.album;
+            response["title"] = songInfo.title;
+            response["songId"] = songInfo.songId;
             
-            if output_path is None:
-                output_path_resolved = video_file.with_suffix('.wav')
-            else:
-                output_path_resolved = Path(output_path)
-            
-            # Build FFmpeg command
-            sample_rate = kwargs.get('sample_rate', 44100)
-            channels = kwargs.get('channels', 2)
-            bitrate = kwargs.get('bitrate', None)
-            
-            cmd = [
-                'ffmpeg',
-                '-i', str(video_file),
-                '-vn',  # No video
-                '-acodec', 'pcm_s16le',  # WAV codec
-                '-ar', str(sample_rate),
-                '-ac', str(channels),
-                '-y',  # Overwrite
-                str(output_path_resolved)
-            ]
-            
-            if bitrate:
-                cmd.insert(-2, '-b:a')
-                cmd.insert(-2, bitrate)
-            
-            try:
-                self._update_progress(f"Extracting audio from: {video_file.name}")
-                subprocess.run(cmd, check=True, capture_output=True)
-                self._update_progress(f"✅ Audio extracted: {output_path_resolved}")
-                return str(output_path_resolved)
-            except subprocess.CalledProcessError as e:
-                raise RuntimeError(f"FFmpeg failed: {e}")
-        
-        return await asyncio.get_event_loop().run_in_executor(self.executor, _extract)
-    
-    async def load_model(self, model_name: str = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"):
-        """
-        Load a separation model (async)
-        """
-        def _load():
-            try:
-                self._update_progress(f"🤖 Loading model: {model_name}")
-                self.separator.load_model(model_filename=model_name)
-                self.current_model = model_name
-                self._update_progress(f"✅ Model loaded successfully")
-            except Exception as e:
-                raise RuntimeError(f"Failed to load model {model_name}: {e}")
-        
-        await asyncio.get_event_loop().run_in_executor(self.executor, _load)
-    
-    async def separate_audio_instrumental_only(self, audio_path: str) -> List[str]:
-        """
-        Separate audio and return only the instrumental track (async)
-        """
-        def _separate():
-            if not self.current_model:
-                raise RuntimeError("No model loaded. Call load_model() first.")
-            
-            try:
-                self._update_progress(f"🎵 Extracting instrumental track: {Path(audio_path).name}")
-                
-                # The separator is already configured to output only instrumental stem
-                # Perform separation
-                output_files = self.separator.separate(audio_path)
-                
-                # Since we configured output_single_stem="Instrumental", we should only get instrumental files
-                instrumental_files = []
-                for file in output_files:
-                    file_path = Path(file)
-                    instrumental_files.append(file)
-                    self._update_progress(f"   ✅ Generated: {file_path.name}")
-                
-                if not instrumental_files:
-                    raise RuntimeError("No instrumental files were generated")
-                
-                self._update_progress(f"✅ Instrumental extraction complete! Generated {len(instrumental_files)} file(s)")
-                
-                # Debug: Log the actual file paths
-                for file in instrumental_files:
-                    self.logger.info(f"Generated file: {file}")
-                
-                return instrumental_files
-                
-            except Exception as e:
-                raise RuntimeError(f"Audio separation failed: {e}")
-        
-        return await asyncio.get_event_loop().run_in_executor(self.executor, _separate)
-    
-    async def process_complete_pipeline(self, 
-                                      input_source: str,
-                                      task_id: str = None,
-                                      keep_intermediate: bool = False,
-                                      **extract_kwargs) -> List[str]:
-        """
-        Complete async pipeline: download/process and separate
-        """
-        if not task_id:
-            task_id = str(uuid.uuid4())[:8]
-        
-        self._update_progress(f"🎬 Starting processing pipeline for task: {task_id}")
-        
-        temp_files_to_cleanup = []
-        
-        try:
-            # Step 1: Handle URL vs local file
-            if self.is_url(input_source):
-                self._update_progress("🌐 Downloading audio from URL", 10)
-                audio_file = await self.download_audio_ytdlp(input_source, task_id)
-                temp_files_to_cleanup.append(audio_file)
-            else:
-                input_path = Path(input_source)
-                if not input_path.exists():
-                    raise FileNotFoundError(f"Input file not found: {input_source}")
-                
-                file_extension = input_path.suffix.lower()
-                
-                if file_extension in self.supported_audio_formats:
-                    self._update_progress("🎵 Processing audio file", 10)
-                    audio_file = str(input_path)
-                elif file_extension in self.supported_video_formats:
-                    self._update_progress("🎬 Extracting audio from video", 10)
-                    temp_audio_path = os.path.join(self.temp_dir, f"{task_id}_audio.wav")
-                    audio_file = await self.extract_audio_ffmpeg(input_source, temp_audio_path, **extract_kwargs)
-                    if not keep_intermediate:
-                        temp_files_to_cleanup.append(audio_file)
-                else:
-                    raise ValueError(f"Unsupported file format: {file_extension}")
-            
-            # Step 2: Load model if needed
-            self._update_progress("🤖 Loading AI model", 30)
-            if self.current_model != "model_bs_roformer_ep_317_sdr_12.9755.ckpt":
-                await self.load_model("model_bs_roformer_ep_317_sdr_12.9755.ckpt")
-            
-            # Step 3: Perform separation
-            self._update_progress("🎵 Separating audio (removing vocals)", 50)
-            output_files = await self.separate_audio_instrumental_only(audio_file)
-            
-            # Step 4: Cleanup temporary files
-            if not keep_intermediate:
-                self._update_progress("🗑️ Cleaning up temporary files", 90)
-                for temp_file in temp_files_to_cleanup:
-                    if os.path.exists(temp_file):
-                        try:
-                            os.remove(temp_file)
-                            self.logger.debug(f"🗑️ Removed temporary file: {temp_file}")
-                        except Exception as e:
-                            self.logger.warning(f"⚠️ Failed to remove temporary file {temp_file}: {e}")
-            
-            self._update_progress("🎉 Processing complete!", 100)
-            return output_files
-            
-        except Exception as e:
-            # Cleanup on error
-            for temp_file in temp_files_to_cleanup:
-                if os.path.exists(temp_file):
-                    try:
-                        os.remove(temp_file)
-                    except:
-                        pass
-            raise e
-    
-    def cleanup_task_files(self, task_id: str):
-        """Clean up all temporary files for a specific task"""
-        try:
-            temp_task_dir = os.path.join(self.temp_dir, task_id)
-            if os.path.exists(temp_task_dir):
-                import shutil
-                shutil.rmtree(temp_task_dir)
-                if hasattr(self, 'logger'):
-                    self.logger.debug(f"Cleaned up task directory: {temp_task_dir}")
-        except Exception as e:
-            if hasattr(self, 'logger'):
-                self.logger.warning(f"Failed to cleanup task {task_id}: {e}")
-    
-    async def batch_process_urls(self, 
-                               urls: List[str],
-                               task_id: str = None,
-                               keep_intermediate: bool = False,
-                               **kwargs) -> List[str]:
-        """
-        Batch process multiple URLs (async)
-        """
-        if not task_id:
-            task_id = str(uuid.uuid4())[:8]
-        
-        self._update_progress(f"📁 Starting batch processing: {len(urls)} URLs")
-        
-        # Load model once for batch processing
-        if self.current_model != "model_bs_roformer_ep_317_sdr_12.9755.ckpt":
-            await self.load_model("model_bs_roformer_ep_317_sdr_12.9755.ckpt")
-        
-        all_output_files = []
-        successful = 0
-        
-        for i, url in enumerate(urls, 1):
-            try:
-                progress = (i / len(urls)) * 100
-                self._update_progress(f"Processing URL {i}/{len(urls)}: {url}", progress)
-                
-                url_task_id = f"{task_id}_{i}"
-                output_files = await self.process_complete_pipeline(
-                    url,
-                    task_id=url_task_id,
-                    keep_intermediate=keep_intermediate,
-                    **kwargs
-                )
-                all_output_files.extend(output_files)
-                successful += 1
-                
-            except Exception as e:
-                self.logger.error(f"❌ Failed to process {url}: {e}")
-        
-        self._update_progress(f"✅ Batch processing complete: {successful}/{len(urls)} URLs processed", 100)
-        return all_output_files
-    
-    def get_file_info(self, file_path: str) -> Dict:
-        """Get information about an audio file"""
-        try:
-            file_path_obj = Path(file_path)
-            if not file_path_obj.exists():
-                self.logger.warning(f"File not found for info: {file_path}")
-                return None
-            
-            file_size = file_path_obj.stat().st_size
-            
-            # Basic file info
-            info = {
-                'filename': file_path_obj.name,
-                'file_path': str(file_path_obj.absolute()),  # Use absolute path
-                'file_size': file_size,
-                'format': file_path_obj.suffix.lower().lstrip('.'),
-                'sample_rate': 44100,  # Default, could be extracted with librosa if needed
-                'duration': None  # Could be extracted with librosa if needed
+            // Add YouTube video information
+            json youtubeInfo = searchYouTubeVideo(songInfo.artist, songInfo.title);
+            if (!youtubeInfo["youtube"].is_null()) {
+                response["youtube"] = youtubeInfo["youtube"];
             }
             
-            self.logger.debug(f"File info for {file_path}: {info}")
-            return info
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get file info for {file_path}: {e}")
-            return None
-    
-    async def separate_audio_to_memory(self, audio_path: str) -> bytes:
-        """
-        Separate audio and return instrumental track as WAV bytes in memory
-        WITHOUT saving any files to disk (uses temporary directory)
-        
-        Args:
-            audio_path: Path to input audio file
-        
-        Returns:
-            WAV audio data as bytes
-        """
-        if not self.current_model:
-            raise RuntimeError("No model loaded. Call load_model() first.")
-        
-        def _separate():
-            try:
-                import io
-                import soundfile as sf
-                import numpy as np
-                import tempfile
-                import os
-                
-                self._update_progress(f"🎵 Extracting instrumental track: {Path(audio_path).name}")
-                
-                # Create a temporary output directory
-                temp_output_dir = tempfile.mkdtemp(prefix="audio_stream_")
-                self.logger.debug(f"   📁 Created temporary output directory: {temp_output_dir}")
-                
-                try:
-                    # Store original output directory
-                    original_output_dir = self.separator.output_dir
-                    self.logger.debug(f"   💾 Original output dir: {original_output_dir}")
-                    
-                    # Change the separator's output directory
-                    self.separator.output_dir = temp_output_dir
-                    self.logger.debug(f"   🔄 Changed output dir to: {self.separator.output_dir}")
-                    
-                    # Also check if separator has other output-related attributes
-                    if hasattr(self.separator, 'model_instance') and hasattr(self.separator.model_instance, 'output_dir'):
-                        self.logger.debug(f"   🔄 Also changing model_instance.output_dir")
-                        original_model_output = self.separator.model_instance.output_dir
-                        self.separator.model_instance.output_dir = temp_output_dir
-                    
-                    # Perform separation
-                    self.logger.debug(f"   🤖 Starting separation with temp dir: {temp_output_dir}")
-                    output_files = self.separator.separate(audio_path)
-                    self.logger.debug(f"   🔍 Separator returned {len(output_files)} files:")
-                    
-                    for i, file in enumerate(output_files):
-                        exists = os.path.exists(file)
-                        self.logger.debug(f"     {i+1}. {file} (exists: {exists})")
+            // Add Spotify album information
+            if (!songInfo.album.empty()) {
+                json spotifyInfo = searchSpotifyAlbum(songInfo.artist, songInfo.album);
+                if (!spotifyInfo["spotify"].is_null()) {
+                    // Mark the identified track
+                    auto& tracks = spotifyInfo["spotify"]["tracks"];
+                    for (auto& track : tracks) {
+                        std::string trackName = track["name"];
+                        // Convert both to lowercase for better matching
+                        std::string lowerTrackName = trackName;
+                        std::string lowerTitle = songInfo.title;
+                        std::transform(lowerTrackName.begin(), lowerTrackName.end(), lowerTrackName.begin(), ::tolower);
+                        std::transform(lowerTitle.begin(), lowerTitle.end(), lowerTitle.begin(), ::tolower);
                         
-                        # If file doesn't exist at returned path, check in temp directory
-                        if not exists:
-                            filename = os.path.basename(file)
-                            temp_path = os.path.join(temp_output_dir, filename)
-                            temp_exists = os.path.exists(temp_path)
-                            self.logger.debug(f"         Checking temp path: {temp_path} (exists: {temp_exists})")
-                    
-                    # Also check what's actually in the temp directory
-                    self.logger.debug(f"   📂 Contents of temp directory {temp_output_dir}:")
-                    try:
-                        temp_contents = os.listdir(temp_output_dir)
-                        for item in temp_contents:
-                            item_path = os.path.join(temp_output_dir, item)
-                            self.logger.debug(f"     - {item} (size: {os.path.getsize(item_path)} bytes)")
-                    except Exception as e:
-                        self.logger.debug(f"     Error listing temp directory: {e}")
-                    
-                    # Find the instrumental file
-                    instrumental_file = None
-                    
-                    # First try the paths returned by separator
-                    for file in output_files:
-                        if 'instrumental' in Path(file).name.lower():
-                            if os.path.exists(file):
-                                instrumental_file = file
-                                self.logger.debug(f"   ✅ Found instrumental at returned path: {file}")
-                                break
-                    
-                    # If not found, check directly in temp directory
-                    if not instrumental_file:
-                        try:
-                            for item in os.listdir(temp_output_dir):
-                                if 'instrumental' in item.lower():
-                                    instrumental_file = os.path.join(temp_output_dir, item)
-                                    self.logger.debug(f"   ✅ Found instrumental in temp dir: {instrumental_file}")
-                                    break
-                        except:
-                            pass
-                    
-                    if not instrumental_file:
-                        raise RuntimeError(f"No instrumental file found. Output files: {output_files}, Temp dir contents: {os.listdir(temp_output_dir) if os.path.exists(temp_output_dir) else 'N/A'}")
-                    
-                    if not os.path.exists(instrumental_file):
-                        raise RuntimeError(f"Instrumental file not found: {instrumental_file}")
-                    
-                    self.logger.debug(f"   📖 Reading instrumental file: {instrumental_file}")
-                    
-                    # Read the audio file into memory
-                    audio_data, sample_rate = sf.read(instrumental_file)
-                    self.logger.debug(f"   📊 Loaded audio: {len(audio_data)} samples at {sample_rate}Hz")
-                    
-                    # Convert to WAV bytes in memory
-                    buffer = io.BytesIO()
-                    sf.write(buffer, audio_data, sample_rate, format='WAV')
-                    wav_bytes = buffer.getvalue()
-                    buffer.close()
-                    
-                    self.logger.debug(f"   💾 Generated WAV: {len(wav_bytes)} bytes")
-                    
-                    return wav_bytes
-                    
-                finally:
-                    # Restore original output directory
-                    self.separator.output_dir = original_output_dir
-                    if hasattr(self.separator, 'model_instance') and hasattr(self.separator.model_instance, 'output_dir'):
-                        self.separator.model_instance.output_dir = original_model_output
-                    self.logger.debug(f"   🔄 Restored output directory")
-                    
-                    # Clean up temp directory
-                    try:
-                        import shutil
-                        shutil.rmtree(temp_output_dir)
-                        self.logger.debug(f"   🗑️ Cleaned up temp directory: {temp_output_dir}")
-                    except Exception as e:
-                        self.logger.debug(f"   ⚠️ Failed to clean up temp directory: {e}")
-                
-            except Exception as e:
-                self.logger.error(f"   ❌ Error in _separate: {e}")
-                raise RuntimeError(f"Audio separation failed: {e}")
+                        if (lowerTrackName.find(lowerTitle) != std::string::npos || 
+                            lowerTitle.find(lowerTrackName) != std::string::npos) {
+                            track["isIdentifiedTrack"] = true;
+                            std::cout << "Identified track: " << trackName << std::endl;
+                        }
+                    }
+                    response["spotify"] = spotifyInfo["spotify"];
+                }
+            }
+            
+        } else {
+            response["match"] = false;
+            response["message"] = "No match found in database";
+        }
         
-        return await asyncio.get_event_loop().run_in_executor(self.executor, _separate)
+        return response;
+    }
+
+public:
+    AudioFingerprintingServer(const std::string& dbPath = "fingerprints.db", 
+                             const std::string& tempDir = "./temp") 
+        : dbPath(dbPath), tempDir(tempDir) {
+        recognizer = std::make_unique<AudioFingerprinting::SongRecognizer>(dbPath);
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+    }
     
-    async def process_url_to_memory(self, 
-                                  input_source: str,
-                                  task_id: str = None,
-                                  keep_intermediate: bool = False,
-                                  **extract_kwargs) -> bytes:
-        """
-        Complete pipeline returning WAV bytes in memory instead of files
-        
-        Args:
-            input_source: URL or path to input audio/video file
-            task_id: Optional task ID for temporary files
-            keep_intermediate: Keep intermediate downloaded/extracted audio files
-            **extract_kwargs: Arguments for audio extraction
-        
-        Returns:
-            WAV audio data as bytes
-        """
-        if not task_id:
-            task_id = str(uuid.uuid4())[:8]
-        
-        self._update_progress(f"🎬 Starting processing pipeline for task: {task_id}")
-        
-        temp_files_to_cleanup = []
-        
-        try:
-            # Step 1: Handle URL vs local file
-            if self.is_url(input_source):
-                self._update_progress("🌐 Downloading audio from URL", 10)
-                audio_file = await self.download_audio_ytdlp(input_source, task_id)
-                temp_files_to_cleanup.append(audio_file)
-            else:
-                input_path = Path(input_source)
-                if not input_path.exists():
-                    raise FileNotFoundError(f"Input file not found: {input_source}")
-                
-                file_extension = input_path.suffix.lower()
-                
-                if file_extension in self.supported_audio_formats:
-                    self._update_progress("🎵 Processing audio file", 10)
-                    audio_file = str(input_path)
-                elif file_extension in self.supported_video_formats:
-                    self._update_progress("🎬 Extracting audio from video", 10)
-                    temp_audio_path = os.path.join(self.temp_dir, f"{task_id}_audio.wav")
-                    audio_file = await self.extract_audio_ffmpeg(input_source, temp_audio_path, **extract_kwargs)
-                    if not keep_intermediate:
-                        temp_files_to_cleanup.append(audio_file)
-                else:
-                    raise ValueError(f"Unsupported file format: {file_extension}")
-            
-            # Step 2: Load model if needed
-            self._update_progress("🤖 Loading AI model", 30)
-            if self.current_model != "model_bs_roformer_ep_317_sdr_12.9755.ckpt":
-                await self.load_model("model_bs_roformer_ep_317_sdr_12.9755.ckpt")
-            
-            # Step 3: Perform separation and return WAV bytes
-            self._update_progress("🎵 Separating audio (removing vocals)", 50)
-            wav_bytes = await self.separate_audio_to_memory(audio_file)
-            
-            # Step 4: Cleanup temporary files
-            if not keep_intermediate:
-                self._update_progress("🗑️ Cleaning up temporary files", 90)
-                for temp_file in temp_files_to_cleanup:
-                    if os.path.exists(temp_file):
-                        try:
-                            os.remove(temp_file)
-                            self.logger.debug(f"Removed temporary file: {temp_file}")
-                        except Exception as e:
-                            self.logger.warning(f"Failed to remove temporary file {temp_file}: {e}")
-            
-            self._update_progress("🎉 Processing complete!", 100)
-            return wav_bytes
-            
-        except Exception as e:
-            # Cleanup on error
-            for temp_file in temp_files_to_cleanup:
-                if os.path.exists(temp_file):
-                    try:
-                        os.remove(temp_file)
-                    except:
-                        pass
-            raise e
+    ~AudioFingerprintingServer() {
+        fftw_cleanup_threads();
+        curl_global_cleanup();
+    }
     
-    def __del__(self):
-        """Cleanup executor on deletion"""
-        if hasattr(self, 'executor'):
-            self.executor.shutdown(wait=False)
+    bool initialize() {
+        // Initialize FFTW threads
+        fftw_init_threads();
+        fftw_plan_with_nthreads(std::thread::hardware_concurrency());
+        
+        // Initialize database
+        if (!recognizer->initializeDatabase()) {
+            std::cerr << "Failed to initialize database" << std::endl;
+            return false;
+        }
+        
+        // Load API credentials from environment variables
+        const char* youtubeKey = std::getenv("YOUTUBE_API_KEY");
+        const char* spotifyClientId = std::getenv("SPOTIFY_CLIENT_ID");
+        const char* spotifyClientSecret = std::getenv("SPOTIFY_CLIENT_SECRET");
+        
+        if (youtubeKey) apiCreds.youtubeApiKey = youtubeKey;
+        if (spotifyClientId) apiCreds.spotifyClientId = spotifyClientId;
+        if (spotifyClientSecret) apiCreds.spotifyClientSecret = spotifyClientSecret;
+        
+        std::cout << "Audio Fingerprinting Server initialized" << std::endl;
+        std::cout << "Database: " << dbPath << std::endl;
+        std::cout << "YouTube API: " << (apiCreds.youtubeApiKey.empty() ? "Disabled" : "Enabled") << std::endl;
+        std::cout << "Spotify API: " << (apiCreds.spotifyClientId.empty() ? "Disabled" : "Enabled") << std::endl;
+        
+        return true;
+    }
+    
+    // Configuration endpoint to set API keys at runtime
+    void handleConfig(const httplib::Request& req, httplib::Response& res) {
+        try {
+            if (req.body.empty()) {
+                json error;
+                error["success"] = false;
+                error["error"] = "No configuration data provided";
+                res.set_content(error.dump(2) + "\n", "application/json");
+                res.status = 400;
+                return;
+            }
+            
+            json config = json::parse(req.body);
+            
+            if (config.contains("youtubeApiKey")) {
+                apiCreds.youtubeApiKey = config["youtubeApiKey"];
+            }
+            if (config.contains("spotifyClientId")) {
+                apiCreds.spotifyClientId = config["spotifyClientId"];
+            }
+            if (config.contains("spotifyClientSecret")) {
+                apiCreds.spotifyClientSecret = config["spotifyClientSecret"];
+                // Clear existing token to force refresh
+                apiCreds.spotifyAccessToken.clear();
+            }
+            
+            json response;
+            response["success"] = true;
+            response["message"] = "Configuration updated";
+            response["youtubeEnabled"] = !apiCreds.youtubeApiKey.empty();
+            response["spotifyEnabled"] = !apiCreds.spotifyClientId.empty() && 
+                                        !apiCreds.spotifyClientSecret.empty();
+            
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_content(response.dump(2) + "\n", "application/json");
+            
+        } catch (const std::exception& e) {
+            json error;
+            error["success"] = false;
+            error["error"] = std::string("Configuration failed: ") + e.what();
+            res.set_content(error.dump(2) + "\n", "application/json");
+            res.status = 500;
+        }
+    }
+    
+    void handleRecognition(const httplib::Request& req, httplib::Response& res) {
+        try {
+            if (!req.has_file("audio") && !req.has_file("file")) {
+                json error;
+                error["success"] = false;
+                error["error"] = "No audio file found in request. Use 'audio' or 'file' as field name.";
+                
+                res.set_content(error.dump(2) + "\n", "application/json");
+                res.status = 400;
+                return;
+            }
+            
+            auto file = req.has_file("audio") ? req.get_file_value("audio") : req.get_file_value("file");
+            
+            std::string filename = "upload.wav";
+            if (!file.filename.empty()) {
+                filename = file.filename;
+            }
+            
+            if (!AudioFingerprinting::SongRecognizer::isSupportedExtension(filename)) {
+                json error;
+                error["success"] = false;
+                error["error"] = "Unsupported file format. Supported formats: mp3, wav, flac";
+                
+                res.set_content(error.dump(2) + "\n", "application/json");
+                res.status = 400;
+                return;
+            }
+            
+            std::string tempFilePath = saveUploadedFile(file.content, filename);
+            
+            auto startTime = std::chrono::high_resolution_clock::now();
+            AudioFingerprinting::SongInfo result = recognizer->recognizeSong(tempFilePath);
+            auto endTime = std::chrono::high_resolution_clock::now();
+            
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+            
+            cleanupTempFile(tempFilePath);
+            
+            // Build enhanced response with YouTube and Spotify data
+            json response = songInfoToJson(result);
+            response["recognitionTimeMs"] = duration.count();
+            
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_content(response.dump(2) + "\n", "application/json");
+            
+        } catch (const std::exception& e) {
+            json error;
+            error["success"] = false;
+            error["error"] = std::string("Recognition failed: ") + e.what();
+            
+            res.set_content(error.dump(2) + "\n", "application/json");
+            res.status = 500;
+        }
+    }
+    
+    void handleStreamRecognition(const httplib::Request& req, httplib::Response& res) {
+        try {
+            if (req.body.empty()) {
+                json error;
+                error["success"] = false;
+                error["error"] = "No audio data found in request body";
+                
+                res.set_content(error.dump(2) + "\n", "application/json");
+                res.status = 400;
+                return;
+            }
+            
+            std::string filename = "stream.wav";
+            auto contentType = req.get_header_value("Content-Type");
+            if (!contentType.empty()) {
+                if (contentType.find("audio/mpeg") != std::string::npos || 
+                    contentType.find("audio/mp3") != std::string::npos) {
+                    filename = "stream.mp3";
+                } else if (contentType.find("audio/flac") != std::string::npos) {
+                    filename = "stream.flac";
+                } else if (contentType.find("audio/wav") != std::string::npos) {
+                    filename = "stream.wav";
+                }
+            }
+            
+            if (!AudioFingerprinting::SongRecognizer::isSupportedExtension(filename)) {
+                json error;
+                error["success"] = false;
+                error["error"] = "Unsupported audio format. Supported formats: mp3, wav, flac";
+                
+                res.set_content(error.dump(2) + "\n", "application/json");
+                res.status = 400;
+                return;
+            }
+            
+            std::string tempFilePath = saveUploadedFile(req.body, filename);
+            
+            auto startTime = std::chrono::high_resolution_clock::now();
+            AudioFingerprinting::SongInfo result = recognizer->recognizeSong(tempFilePath);
+            auto endTime = std::chrono::high_resolution_clock::now();
+            
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+            
+            cleanupTempFile(tempFilePath);
+            
+            json response = songInfoToJson(result);
+            response["recognitionTimeMs"] = duration.count();
+            
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_content(response.dump(2) + "\n", "application/json");
+            
+        } catch (const std::exception& e) {
+            json error;
+            error["success"] = false;
+            error["error"] = std::string("Recognition failed: ") + e.what();
+            
+            res.set_content(error.dump(2) + "\n", "application/json");
+            res.status = 500;
+        }
+    }
+    
+    void handleStats(const httplib::Request&, httplib::Response& res) {
+        try {
+            json stats;
+            stats["totalSongs"] = 0; // recognizer->getTotalSongs();
+            stats["totalHashes"] = 0; // recognizer->getTotalHashes();
+            stats["database"] = dbPath;
+            stats["apiStatus"] = {
+                {"youtube", !apiCreds.youtubeApiKey.empty()},
+                {"spotify", !apiCreds.spotifyClientId.empty() && !apiCreds.spotifyClientSecret.empty()}
+            };
+            
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_content(stats.dump(2) + "\n", "application/json");
+            
+        } catch (const std::exception& e) {
+            json error;
+            error["success"] = false;
+            error["error"] = std::string("Failed to get stats: ") + e.what();
+            
+            res.set_content(error.dump(2) + "\n", "application/json");
+            res.status = 500;
+        }
+    }
+};
+
+int main(int argc, char* argv[]) {
+    std::string dbPath = "fingerprints.db";
+    int port = 8080;
+    
+    // Parse command line arguments
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--db" && i + 1 < argc) {
+            dbPath = argv[++i];
+        } else if (arg == "--port" && i + 1 < argc) {
+            port = std::stoi(argv[++i]);
+        } else if (arg == "--help") {
+            std::cout << "Usage: " << argv[0] << " [options]\n";
+            std::cout << "Options:\n";
+            std::cout << "  --db <path>     Database path (default: fingerprints.db)\n";
+            std::cout << "  --port <port>   Server port (default: 8080)\n";
+            std::cout << "  --help          Show this help\n";
+            std::cout << "\nEnvironment Variables:\n";
+            std::cout << "  YOUTUBE_API_KEY      YouTube Data API v3 key\n";
+            std::cout << "  SPOTIFY_CLIENT_ID    Spotify Client ID\n";
+            std::cout << "  SPOTIFY_CLIENT_SECRET Spotify Client Secret\n";
+            return 0;
+        }
+    }
+    
+    // Initialize server
+    AudioFingerprintingServer server(dbPath);
+    if (!server.initialize()) {
+        return 1;
+    }
+    
+    // Create HTTP server
+    httplib::Server svr;
+    svr.set_payload_max_length(50 * 1024 * 1024);
+    
+    // Enable CORS
+    svr.set_pre_routing_handler([](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
+        res.set_header("Access-Control-Allow-Headers", "Content-Type");
+        return httplib::Server::HandlerResponse::Unhandled;
+    });
+    
+    // Handle OPTIONS requests
+    svr.Options("/.*", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
+        res.set_header("Access-Control-Allow-Headers", "Content-Type");
+        return;
+    });
+    
+    // Recognition endpoint (multipart file upload)
+    svr.Post("/recognize", [&server](const httplib::Request& req, httplib::Response& res) {
+        server.handleRecognition(req, res);
+    });
+    
+    // Streaming recognition endpoint (raw audio data)
+    svr.Post("/recognize/stream", [&server](const httplib::Request& req, httplib::Response& res) {
+        server.handleStreamRecognition(req, res);
+    });
+    
+    // Stats endpoint
+    svr.Get("/stats", [&server](const httplib::Request& req, httplib::Response& res) {
+        server.handleStats(req, res);
+    });
+    
+    // Configuration endpoint
+    svr.Put("/config", [&server](const httplib::Request& req, httplib::Response& res) {
+        server.handleConfig(req, res);
+    });
+    
+    // Health check endpoint
+    svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
+        json health;
+        health["status"] = "ok";
+        health["service"] = "audio-fingerprinting-enhanced";
+        
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_content(health.dump(2) + "\n", "application/json");
+    });
+    
+    // Start server
+    std::cout << "Starting Enhanced Audio Fingerprinting Server on port " << port << std::endl;
+    std::cout << "Endpoints:" << std::endl;
+    std::cout << "  POST /recognize        - Upload audio file for recognition (multipart)" << std::endl;
+    std::cout << "  POST /recognize/stream - Stream audio data for recognition (raw)" << std::endl;
+    std::cout << "  GET  /stats           - Database statistics" << std::endl;
+    std::cout << "  PUT  /config          - Configure API keys" << std::endl;
+    std::cout << "  GET  /health          - Health check" << std::endl;
+    
+    if (!svr.listen("0.0.0.0", port)) {
+        std::cerr << "Failed to start server on port " << port << std::endl;
+        return 1;
+    }
+    
+    return 0;
+}
