@@ -7,6 +7,8 @@
 #include <nlohmann/json.hpp>
 #include <curl/curl.h>
 #include <regex>
+#include <algorithm>
+#include <cctype>
 
 #include "../recognition/Recognition.h"
 
@@ -60,6 +62,91 @@ std::string base64_encode(std::string const& str) {
     return ret;
 }
 
+// .env file parser
+std::map<std::string, std::string> parseEnvFile(const std::string& filePath) {
+    std::map<std::string, std::string> env;
+    
+    std::ifstream file(filePath);
+    if (!file.is_open()) {
+        std::cout << "Warning: .env file not found at " << filePath << std::endl;
+        return env;
+    }
+    
+    std::string line;
+    while (std::getline(file, line)) {
+        // Skip empty lines and comments
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        
+        // Find the = delimiter
+        size_t delimPos = line.find('=');
+        if (delimPos != std::string::npos) {
+            std::string key = line.substr(0, delimPos);
+            std::string value = line.substr(delimPos + 1);
+            
+            // Trim whitespace
+            key.erase(0, key.find_first_not_of(" \t"));
+            key.erase(key.find_last_not_of(" \t") + 1);
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t") + 1);
+            
+            // Remove quotes if present
+            if (value.length() >= 2 && 
+                ((value.front() == '"' && value.back() == '"') ||
+                 (value.front() == '\'' && value.back() == '\''))) {
+                value = value.substr(1, value.length() - 2);
+            }
+            
+            env[key] = value;
+        }
+    }
+    
+    return env;
+}
+
+// Fuzzy string matching for track identification
+double calculateSimilarity(const std::string& str1, const std::string& str2) {
+    std::string s1 = str1, s2 = str2;
+    
+    // Convert to lowercase
+    std::transform(s1.begin(), s1.end(), s1.begin(), ::tolower);
+    std::transform(s2.begin(), s2.end(), s2.begin(), ::tolower);
+    
+    // Remove common variations
+    std::regex featRegex(R"(\s*(feat\.|featuring|ft\.)\s*.*)", std::regex_constants::icase);
+    s1 = std::regex_replace(s1, featRegex, "");
+    s2 = std::regex_replace(s2, featRegex, "");
+    
+    // Trim whitespace
+    s1.erase(0, s1.find_first_not_of(" \t"));
+    s1.erase(s1.find_last_not_of(" \t") + 1);
+    s2.erase(0, s2.find_first_not_of(" \t"));
+    s2.erase(s2.find_last_not_of(" \t") + 1);
+    
+    // Exact match gets highest score
+    if (s1 == s2) return 1.0;
+    
+    // Check if one is contained in the other
+    if (s1.find(s2) != std::string::npos || s2.find(s1) != std::string::npos) {
+        return 0.8;
+    }
+    
+    // Simple character overlap calculation
+    std::set<char> chars1(s1.begin(), s1.end());
+    std::set<char> chars2(s2.begin(), s2.end());
+    
+    std::set<char> intersection;
+    std::set_intersection(chars1.begin(), chars1.end(),
+                         chars2.begin(), chars2.end(),
+                         std::inserter(intersection, intersection.begin()));
+    
+    double overlap = static_cast<double>(intersection.size()) / 
+                    std::max(chars1.size(), chars2.size());
+    
+    return overlap * 0.6; // Lower score for character overlap
+}
+
 // Struct to hold API credentials
 struct APICredentials {
     std::string youtubeApiKey;
@@ -67,6 +154,9 @@ struct APICredentials {
     std::string spotifyClientSecret;
     std::string spotifyAccessToken;
     std::chrono::system_clock::time_point spotifyTokenExpiry;
+    
+    bool hasYouTube() const { return !youtubeApiKey.empty(); }
+    bool hasSpotify() const { return !spotifyClientId.empty() && !spotifyClientSecret.empty(); }
 };
 
 // Helper struct for HTTP responses
@@ -89,6 +179,7 @@ private:
     std::unique_ptr<AudioFingerprinting::SongRecognizer> recognizer;
     std::string dbPath;
     std::string tempDir;
+    std::string envPath;
     APICredentials apiCreds;
     
     // Helper to save uploaded file temporarily
@@ -186,8 +277,8 @@ private:
     
     // Spotify API methods
     bool refreshSpotifyToken() {
-        if (apiCreds.spotifyClientId.empty() || apiCreds.spotifyClientSecret.empty()) {
-            std::cerr << "Spotify credentials not configured" << std::endl;
+        if (!apiCreds.hasSpotify()) {
+            std::cout << "Spotify credentials not available" << std::endl;
             return false;
         }
         
@@ -231,69 +322,153 @@ private:
         return true;
     }
     
+    // Enhanced YouTube search with fallback strategies
     json searchYouTubeVideo(const std::string& artist, const std::string& title) {
         json result;
-        result["youtube"] = nullptr;
         
-        if (apiCreds.youtubeApiKey.empty()) {
-            std::cout << "YouTube API key not configured, skipping video search" << std::endl;
+        if (!apiCreds.hasYouTube()) {
+            std::cout << "YouTube API key not available, skipping video search" << std::endl;
             return result;
         }
         
-        std::string query = urlEncode(artist + " " + title + " official");
-        std::string url = "https://www.googleapis.com/youtube/v3/search"
-                         "?part=snippet"
-                         "&type=video"
-                         "&videoCategoryId=10" // Music category
-                         "&maxResults=1"
-                         "&q=" + query +
-                         "&key=" + apiCreds.youtubeApiKey;
+        // Try 3 different search strategies
+        std::vector<std::string> searchQueries = {
+            artist + " " + title + " official",
+            artist + " " + title + " music video",
+            artist + " " + title
+        };
         
-        HTTPResponse response = makeHTTPRequest(url);
-        
-        if (response.responseCode == 200) {
-            try {
-                json youtubeResponse = json::parse(response.data);
-                if (youtubeResponse.contains("items") && !youtubeResponse["items"].empty()) {
-                    auto item = youtubeResponse["items"][0];
-                    json youtubeInfo;
-                    youtubeInfo["videoId"] = item["id"]["videoId"];
-                    youtubeInfo["url"] = "https://www.youtube.com/watch?v=" + 
-                                        item["id"]["videoId"].get<std::string>();
-                    youtubeInfo["title"] = item["snippet"]["title"];
-                    youtubeInfo["channelTitle"] = item["snippet"]["channelTitle"];
-                    
-                    // Get high quality thumbnail
-                    if (item["snippet"]["thumbnails"].contains("high")) {
-                        youtubeInfo["thumbnail"] = item["snippet"]["thumbnails"]["high"]["url"];
-                    } else if (item["snippet"]["thumbnails"].contains("default")) {
-                        youtubeInfo["thumbnail"] = item["snippet"]["thumbnails"]["default"]["url"];
+        for (const auto& queryBase : searchQueries) {
+            std::string query = urlEncode(queryBase);
+            std::string url = "https://www.googleapis.com/youtube/v3/search"
+                             "?part=snippet"
+                             "&type=video"
+                             "&videoCategoryId=10" // Music category
+                             "&maxResults=10" // Get more results to filter
+                             "&order=relevance"
+                             "&q=" + query +
+                             "&key=" + apiCreds.youtubeApiKey;
+            
+            HTTPResponse response = makeHTTPRequest(url);
+            
+            if (response.responseCode == 200) {
+                try {
+                    json youtubeResponse = json::parse(response.data);
+                    if (youtubeResponse.contains("items") && !youtubeResponse["items"].empty()) {
+                        
+                        // Find the best video based on channel preferences
+                        json bestVideo = findBestYouTubeVideo(youtubeResponse["items"], artist);
+                        
+                        if (!bestVideo.is_null()) {
+                            json youtubeInfo;
+                            youtubeInfo["videoId"] = bestVideo["id"]["videoId"];
+                            youtubeInfo["url"] = "https://www.youtube.com/watch?v=" + 
+                                                bestVideo["id"]["videoId"].get<std::string>();
+                            youtubeInfo["title"] = bestVideo["snippet"]["title"];
+                            youtubeInfo["channelTitle"] = bestVideo["snippet"]["channelTitle"];
+                            
+                            // Get high quality thumbnail
+                            if (bestVideo["snippet"]["thumbnails"].contains("high")) {
+                                youtubeInfo["thumbnail"] = bestVideo["snippet"]["thumbnails"]["high"]["url"];
+                            } else if (bestVideo["snippet"]["thumbnails"].contains("default")) {
+                                youtubeInfo["thumbnail"] = bestVideo["snippet"]["thumbnails"]["default"]["url"];
+                            }
+                            
+                            result["youtube"] = youtubeInfo;
+                            std::cout << "Found YouTube video: " << youtubeInfo["title"] << 
+                                        " (Strategy: " << queryBase << ")" << std::endl;
+                            return result;
+                        }
                     }
-                    
-                    result["youtube"] = youtubeInfo;
-                    std::cout << "Found YouTube video: " << youtubeInfo["title"] << std::endl;
+                } catch (const std::exception& e) {
+                    std::cerr << "YouTube API parsing error: " << e.what() << std::endl;
                 }
-            } catch (const std::exception& e) {
-                std::cerr << "YouTube API parsing error: " << e.what() << std::endl;
+            } else if (response.responseCode == 403) {
+                std::cerr << "YouTube API quota exceeded" << std::endl;
+                break; // No point trying other queries
+            } else {
+                std::cerr << "YouTube API request failed. HTTP " << response.responseCode << std::endl;
             }
-        } else {
-            std::cerr << "YouTube API request failed. HTTP " << response.responseCode << std::endl;
         }
         
         return result;
     }
     
-    json searchSpotifyAlbum(const std::string& artist, const std::string& album) {
+    // Find best YouTube video based on channel preferences
+    json findBestYouTubeVideo(const json& videos, const std::string& artist) {
+        json bestVideo;
+        int bestScore = -1;
+        
+        for (const auto& video : videos) {
+            int score = 0;
+            std::string channelTitle = video["snippet"]["channelTitle"];
+            std::string channelTitleLower = channelTitle;
+            std::transform(channelTitleLower.begin(), channelTitleLower.end(), 
+                          channelTitleLower.begin(), ::tolower);
+            
+            std::string artistLower = artist;
+            std::transform(artistLower.begin(), artistLower.end(), 
+                          artistLower.begin(), ::tolower);
+            
+            // Check for "Official" in channel name (highest priority)
+            if (channelTitleLower.find("official") != std::string::npos) {
+                score += 100;
+            }
+            
+            // Check if channel name matches artist name
+            if (channelTitleLower.find(artistLower) != std::string::npos || 
+                artistLower.find(channelTitleLower) != std::string::npos) {
+                score += 50;
+            }
+            
+            // Note: YouTube API v3 doesn't provide view count in search results
+            // We could make additional API calls to get statistics, but that would use more quota
+            
+            if (score > bestScore) {
+                bestScore = score;
+                bestVideo = video;
+            }
+        }
+        
+        // If no video scored points, return the first one (relevance order)
+        if (bestVideo.is_null() && !videos.empty()) {
+            bestVideo = videos[0];
+        }
+        
+        return bestVideo;
+    }
+    
+    // Enhanced Spotify search with album-first approach
+    json searchSpotifyAlbum(const std::string& artist, const std::string& album, const std::string& trackTitle) {
         json result;
-        result["spotify"] = nullptr;
         
         if (!ensureSpotifyToken()) {
+            std::cout << "Spotify token not available" << std::endl;
             return result;
         }
         
-        std::string query = urlEncode("artist:" + artist + " album:" + album);
+        // Strategy 1: Search for specific album
+        json albumResult = searchSpecificSpotifyAlbum(artist, album, trackTitle);
+        if (!albumResult.is_null()) {
+            result["spotify"] = albumResult;
+            return result;
+        }
+        
+        // Strategy 2: Search for track and find its album
+        json trackResult = searchSpotifyTrackAndAlbum(artist, trackTitle);
+        if (!trackResult.is_null()) {
+            result["spotify"] = trackResult;
+            return result;
+        }
+        
+        std::cout << "No Spotify results found for artist: " << artist << ", album: " << album << std::endl;
+        return result;
+    }
+    
+    json searchSpecificSpotifyAlbum(const std::string& artist, const std::string& album, const std::string& trackTitle) {
+        std::string query = urlEncode("artist:\"" + artist + "\" album:\"" + album + "\"");
         std::string url = "https://api.spotify.com/v1/search?q=" + query + 
-                         "&type=album&limit=1";
+                         "&type=album&limit=5";
         
         std::vector<std::string> headers = {
             "Authorization: Bearer " + apiCreds.spotifyAccessToken
@@ -308,41 +483,87 @@ private:
                     spotifyResponse["albums"].contains("items") &&
                     !spotifyResponse["albums"]["items"].empty()) {
                     
-                    auto albumData = spotifyResponse["albums"]["items"][0];
-                    std::string albumId = albumData["id"];
-                    
-                    // Get album tracks
-                    json albumInfo = getSpotifyAlbumTracks(albumId);
-                    if (!albumInfo.is_null()) {
-                        albumInfo["albumUrl"] = albumData["external_urls"]["spotify"];
-                        albumInfo["albumId"] = albumId;
-                        albumInfo["albumName"] = albumData["name"];
-                        albumInfo["releaseDate"] = albumData["release_date"];
+                    // Try each album to find the one with our track
+                    for (const auto& albumData : spotifyResponse["albums"]["items"]) {
+                        std::string albumId = albumData["id"];
+                        json albumInfo = getSpotifyAlbumTracks(albumId, trackTitle);
                         
-                        // Get highest quality album image
-                        if (!albumData["images"].empty()) {
-                            albumInfo["albumImage"] = albumData["images"][0]["url"];
+                        if (!albumInfo.is_null()) {
+                            albumInfo["albumUrl"] = albumData["external_urls"]["spotify"];
+                            albumInfo["albumId"] = albumId;
+                            albumInfo["albumName"] = albumData["name"];
+                            albumInfo["releaseDate"] = albumData["release_date"];
+                            
+                            // Get highest quality album image
+                            if (!albumData["images"].empty()) {
+                                albumInfo["albumImage"] = albumData["images"][0]["url"];
+                            }
+                            
+                            std::cout << "Found Spotify album (specific search): " << albumData["name"] << std::endl;
+                            return albumInfo;
                         }
-                        
-                        result["spotify"] = albumInfo;
-                        std::cout << "Found Spotify album: " << albumData["name"] << std::endl;
                     }
                 }
             } catch (const std::exception& e) {
-                std::cerr << "Spotify API parsing error: " << e.what() << std::endl;
+                std::cerr << "Spotify album search parsing error: " << e.what() << std::endl;
             }
         } else {
             std::cerr << "Spotify album search failed. HTTP " << response.responseCode << std::endl;
         }
         
-        return result;
+        return nullptr;
     }
     
-    json getSpotifyAlbumTracks(const std::string& albumId) {
-        if (!ensureSpotifyToken()) {
-            return nullptr;
+    json searchSpotifyTrackAndAlbum(const std::string& artist, const std::string& trackTitle) {
+        std::string query = urlEncode("artist:\"" + artist + "\" track:\"" + trackTitle + "\"");
+        std::string url = "https://api.spotify.com/v1/search?q=" + query + 
+                         "&type=track&limit=10";
+        
+        std::vector<std::string> headers = {
+            "Authorization: Bearer " + apiCreds.spotifyAccessToken
+        };
+        
+        HTTPResponse response = makeHTTPRequest(url, headers);
+        
+        if (response.responseCode == 200) {
+            try {
+                json spotifyResponse = json::parse(response.data);
+                if (spotifyResponse.contains("tracks") && 
+                    spotifyResponse["tracks"].contains("items") &&
+                    !spotifyResponse["tracks"]["items"].empty()) {
+                    
+                    // Find the best matching track
+                    for (const auto& track : spotifyResponse["tracks"]["items"]) {
+                        std::string albumId = track["album"]["id"];
+                        json albumInfo = getSpotifyAlbumTracks(albumId, trackTitle);
+                        
+                        if (!albumInfo.is_null()) {
+                            albumInfo["albumUrl"] = track["album"]["external_urls"]["spotify"];
+                            albumInfo["albumId"] = albumId;
+                            albumInfo["albumName"] = track["album"]["name"];
+                            albumInfo["releaseDate"] = track["album"]["release_date"];
+                            
+                            // Get highest quality album image
+                            if (!track["album"]["images"].empty()) {
+                                albumInfo["albumImage"] = track["album"]["images"][0]["url"];
+                            }
+                            
+                            std::cout << "Found Spotify album (track search): " << track["album"]["name"] << std::endl;
+                            return albumInfo;
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Spotify track search parsing error: " << e.what() << std::endl;
+            }
+        } else {
+            std::cerr << "Spotify track search failed. HTTP " << response.responseCode << std::endl;
         }
         
+        return nullptr;
+    }
+    
+    json getSpotifyAlbumTracks(const std::string& albumId, const std::string& targetTrackTitle) {
         std::string url = "https://api.spotify.com/v1/albums/" + albumId + "/tracks";
         
         std::vector<std::string> headers = {
@@ -357,7 +578,12 @@ private:
                 json albumTracks;
                 albumTracks["tracks"] = json::array();
                 
-                for (const auto& track : tracksResponse["items"]) {
+                bool foundTargetTrack = false;
+                double bestSimilarity = 0.0;
+                size_t bestTrackIndex = 0;
+                
+                for (size_t i = 0; i < tracksResponse["items"].size(); ++i) {
+                    const auto& track = tracksResponse["items"][i];
                     json trackInfo;
                     trackInfo["name"] = track["name"];
                     trackInfo["trackNumber"] = track["track_number"];
@@ -369,16 +595,12 @@ private:
                     // Add preview URL for 30-second samples
                     if (track.contains("preview_url") && !track["preview_url"].is_null()) {
                         trackInfo["previewUrl"] = track["preview_url"];
-                    } else {
-                        trackInfo["previewUrl"] = nullptr;
                     }
                     
                     // Format duration for display
                     int durationMs = track["duration_ms"];
                     int minutes = durationMs / 60000;
                     int seconds = (durationMs % 60000) / 1000;
-                    // char formatted[10];
-                    // sprintf(formatted, "%d:%02d", minutes, seconds);
                     char formatted[16];
                     snprintf(formatted, sizeof(formatted), "%d:%02d", minutes, seconds);
                     trackInfo["durationFormatted"] = formatted;
@@ -390,13 +612,37 @@ private:
                     }
                     trackInfo["artists"] = artists;
                     
-                    // Initialize as not identified
-                    trackInfo["isIdentifiedTrack"] = false;
+                    // Check similarity with target track
+                    std::string trackName = track["name"];
+                    double similarity = calculateSimilarity(trackName, targetTrackTitle);
+                    
+                    if (similarity > bestSimilarity) {
+                        bestSimilarity = similarity;
+                        bestTrackIndex = i;
+                    }
+                    
+                    // Mark as identified if good match (threshold 0.7)
+                    trackInfo["isIdentifiedTrack"] = (similarity >= 0.7);
+                    if (similarity >= 0.7) {
+                        foundTargetTrack = true;
+                        std::cout << "Identified track with similarity " << similarity << ": " << trackName << std::endl;
+                    }
                     
                     albumTracks["tracks"].push_back(trackInfo);
                 }
                 
-                return albumTracks;
+                // If no track met the threshold, mark the best match
+                if (!foundTargetTrack && bestSimilarity > 0.3 && !albumTracks["tracks"].empty()) {
+                    albumTracks["tracks"][bestTrackIndex]["isIdentifiedTrack"] = true;
+                    std::cout << "Best match with similarity " << bestSimilarity << ": " 
+                              << albumTracks["tracks"][bestTrackIndex]["name"] << std::endl;
+                }
+                
+                // Only return album info if we found a reasonable match
+                if (bestSimilarity > 0.3) {
+                    return albumTracks;
+                }
+                
             } catch (const std::exception& e) {
                 std::cerr << "Spotify tracks parsing error: " << e.what() << std::endl;
             }
@@ -407,50 +653,33 @@ private:
         return nullptr;
     }
     
-    // Enhanced song info to JSON conversion
+    // Enhanced song info to JSON conversion with proper structure
     json songInfoToJson(const AudioFingerprinting::SongInfo& songInfo) {
         json response;
         response["success"] = !songInfo.songId.empty();
+        response["match"] = !songInfo.songId.empty();
         
         if (!songInfo.songId.empty()) {
-            response["match"] = true;
             response["artist"] = songInfo.artist;
             response["album"] = songInfo.album;
             response["title"] = songInfo.title;
             response["songId"] = songInfo.songId;
             
             // Add YouTube video information
-            json youtubeInfo = searchYouTubeVideo(songInfo.artist, songInfo.title);
-            if (!youtubeInfo["youtube"].is_null()) {
-                response["youtube"] = youtubeInfo["youtube"];
+            json youtubeResult = searchYouTubeVideo(songInfo.artist, songInfo.title);
+            if (youtubeResult.contains("youtube")) {
+                response["youtube"] = youtubeResult["youtube"];
             }
             
             // Add Spotify album information
             if (!songInfo.album.empty()) {
-                json spotifyInfo = searchSpotifyAlbum(songInfo.artist, songInfo.album);
-                if (!spotifyInfo["spotify"].is_null()) {
-                    // Mark the identified track
-                    auto& tracks = spotifyInfo["spotify"]["tracks"];
-                    for (auto& track : tracks) {
-                        std::string trackName = track["name"];
-                        // Convert both to lowercase for better matching
-                        std::string lowerTrackName = trackName;
-                        std::string lowerTitle = songInfo.title;
-                        std::transform(lowerTrackName.begin(), lowerTrackName.end(), lowerTrackName.begin(), ::tolower);
-                        std::transform(lowerTitle.begin(), lowerTitle.end(), lowerTitle.begin(), ::tolower);
-                        
-                        if (lowerTrackName.find(lowerTitle) != std::string::npos || 
-                            lowerTitle.find(lowerTrackName) != std::string::npos) {
-                            track["isIdentifiedTrack"] = true;
-                            std::cout << "Identified track: " << trackName << std::endl;
-                        }
-                    }
-                    response["spotify"] = spotifyInfo["spotify"];
+                json spotifyResult = searchSpotifyAlbum(songInfo.artist, songInfo.album, songInfo.title);
+                if (spotifyResult.contains("spotify")) {
+                    response["spotify"] = spotifyResult["spotify"];
                 }
             }
             
         } else {
-            response["match"] = false;
             response["message"] = "No match found in database";
         }
         
@@ -459,10 +688,14 @@ private:
 
 public:
     AudioFingerprintingServer(const std::string& dbPath = "fingerprints.db", 
-                             const std::string& tempDir = "./temp") 
+                             const std::string& tempDir = "./temp",
+                             const std::string& envPath = "") 
         : dbPath(dbPath), tempDir(tempDir) {
         recognizer = std::make_unique<AudioFingerprinting::SongRecognizer>(dbPath);
         curl_global_init(CURL_GLOBAL_DEFAULT);
+        
+        // Store env path for later use
+        this->envPath = envPath;
     }
     
     ~AudioFingerprintingServer() {
@@ -481,19 +714,47 @@ public:
             return false;
         }
         
-        // Load API credentials from environment variables
-        const char* youtubeKey = std::getenv("YOUTUBE_API_KEY");
-        const char* spotifyClientId = std::getenv("SPOTIFY_CLIENT_ID");
-        const char* spotifyClientSecret = std::getenv("SPOTIFY_CLIENT_SECRET");
+        // Load API credentials from .env file
+        std::map<std::string, std::string> envVars;
         
-        if (youtubeKey) apiCreds.youtubeApiKey = youtubeKey;
-        if (spotifyClientId) apiCreds.spotifyClientId = spotifyClientId;
-        if (spotifyClientSecret) apiCreds.spotifyClientSecret = spotifyClientSecret;
+        if (!envPath.empty()) {
+            // Use specified env path
+            envVars = parseEnvFile(envPath);
+            if (!envVars.empty()) {
+                std::cout << "Loaded .env from: " << envPath << std::endl;
+            }
+        } else {
+            // Try multiple locations for .env file
+            std::vector<std::string> envPaths = {
+                ".env",
+                "./.env",
+                "../.env",
+                "../../.env"
+            };
+            
+            for (const auto& path : envPaths) {
+                envVars = parseEnvFile(path);
+                if (!envVars.empty()) {
+                    std::cout << "Loaded .env from: " << path << std::endl;
+                    break;
+                }
+            }
+        }
         
-        std::cout << "Audio Fingerprinting Server initialized" << std::endl;
+        if (envVars.find("YOUTUBE_API_KEY") != envVars.end()) {
+            apiCreds.youtubeApiKey = envVars["YOUTUBE_API_KEY"];
+        }
+        if (envVars.find("SPOTIFY_CLIENT_ID") != envVars.end()) {
+            apiCreds.spotifyClientId = envVars["SPOTIFY_CLIENT_ID"];
+        }
+        if (envVars.find("SPOTIFY_CLIENT_SECRET") != envVars.end()) {
+            apiCreds.spotifyClientSecret = envVars["SPOTIFY_CLIENT_SECRET"];
+        }
+        
+        std::cout << "Enhanced Audio Fingerprinting Server initialized" << std::endl;
         std::cout << "Database: " << dbPath << std::endl;
-        std::cout << "YouTube API: " << (apiCreds.youtubeApiKey.empty() ? "Disabled" : "Enabled") << std::endl;
-        std::cout << "Spotify API: " << (apiCreds.spotifyClientId.empty() ? "Disabled" : "Enabled") << std::endl;
+        std::cout << "YouTube API: " << (apiCreds.hasYouTube() ? "Enabled" : "Disabled") << std::endl;
+        std::cout << "Spotify API: " << (apiCreds.hasSpotify() ? "Enabled" : "Disabled") << std::endl;
         
         return true;
     }
@@ -527,9 +788,8 @@ public:
             json response;
             response["success"] = true;
             response["message"] = "Configuration updated";
-            response["youtubeEnabled"] = !apiCreds.youtubeApiKey.empty();
-            response["spotifyEnabled"] = !apiCreds.spotifyClientId.empty() && 
-                                        !apiCreds.spotifyClientSecret.empty();
+            response["youtubeEnabled"] = apiCreds.hasYouTube();
+            response["spotifyEnabled"] = apiCreds.hasSpotify();
             
             res.set_header("Access-Control-Allow-Origin", "*");
             res.set_content(response.dump(2) + "\n", "application/json");
@@ -667,8 +927,8 @@ public:
             stats["totalHashes"] = 0; // recognizer->getTotalHashes();
             stats["database"] = dbPath;
             stats["apiStatus"] = {
-                {"youtube", !apiCreds.youtubeApiKey.empty()},
-                {"spotify", !apiCreds.spotifyClientId.empty() && !apiCreds.spotifyClientSecret.empty()}
+                {"youtube", apiCreds.hasYouTube()},
+                {"spotify", apiCreds.hasSpotify()}
             };
             
             res.set_header("Access-Control-Allow-Origin", "*");
@@ -688,6 +948,7 @@ public:
 int main(int argc, char* argv[]) {
     std::string dbPath = "fingerprints.db";
     int port = 8080;
+    std::string envPath = "";
     
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -696,13 +957,16 @@ int main(int argc, char* argv[]) {
             dbPath = argv[++i];
         } else if (arg == "--port" && i + 1 < argc) {
             port = std::stoi(argv[++i]);
+        } else if (arg == "--env" && i + 1 < argc) {
+            envPath = argv[++i];
         } else if (arg == "--help") {
             std::cout << "Usage: " << argv[0] << " [options]\n";
             std::cout << "Options:\n";
             std::cout << "  --db <path>     Database path (default: fingerprints.db)\n";
             std::cout << "  --port <port>   Server port (default: 8080)\n";
+            std::cout << "  --env <path>    .env file path (default: auto-detect)\n";
             std::cout << "  --help          Show this help\n";
-            std::cout << "\nEnvironment Variables:\n";
+            std::cout << "\nEnvironment Variables (from .env file):\n";
             std::cout << "  YOUTUBE_API_KEY      YouTube Data API v3 key\n";
             std::cout << "  SPOTIFY_CLIENT_ID    Spotify Client ID\n";
             std::cout << "  SPOTIFY_CLIENT_SECRET Spotify Client Secret\n";
@@ -711,7 +975,7 @@ int main(int argc, char* argv[]) {
     }
     
     // Initialize server
-    AudioFingerprintingServer server(dbPath);
+    AudioFingerprintingServer server(dbPath, "./temp", envPath);
     if (!server.initialize()) {
         return 1;
     }

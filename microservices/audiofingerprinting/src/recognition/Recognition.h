@@ -20,6 +20,7 @@ private:
     int scoreMatch(const std::vector<MatchOffset>& offsets);
     std::string bestMatch(const std::map<std::string, std::vector<MatchOffset>>& matches);
     SongInfo extractMetadata(const std::string& filename);
+    void displayTopMatches(const std::map<std::string, std::vector<MatchOffset>>& matches);
     
 public:
     SongRecognizer(const std::string& dbPath = "fingerprints.db");

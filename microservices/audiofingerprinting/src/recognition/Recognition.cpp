@@ -132,6 +132,17 @@ int SongRecognizer::scoreMatch(const std::vector<MatchOffset>& offsets) {
     return maxCount;
 }
 
+// Helper struct for ranking matches
+struct MatchRanking {
+    std::string songId;
+    SongInfo songInfo;
+    int score;
+    int matchCount;
+    
+    MatchRanking(const std::string& id, const SongInfo& info, int s, int count)
+        : songId(id), songInfo(info), score(s), matchCount(count) {}
+};
+
 std::string SongRecognizer::bestMatch(const std::map<std::string, std::vector<MatchOffset>>& matches) {
     std::string bestSongId;
     int bestScore = 0;
@@ -153,6 +164,46 @@ std::string SongRecognizer::bestMatch(const std::map<std::string, std::vector<Ma
     }
     
     return bestSongId;
+}
+
+void SongRecognizer::displayTopMatches(const std::map<std::string, std::vector<MatchOffset>>& matches) {
+    std::vector<MatchRanking> rankings;
+    
+    // Calculate scores for all matches
+    for (const auto& match : matches) {
+        const std::string& songId = match.first;
+        const std::vector<MatchOffset>& offsets = match.second;
+        
+        int score = scoreMatch(offsets);
+        int matchCount = static_cast<int>(offsets.size());
+        
+        // Get song info for display
+        SongInfo info = db->getInfoForSongId(songId);
+        
+        rankings.emplace_back(songId, info, score, matchCount);
+    }
+    
+    // Sort by score (descending), then by match count (descending)
+    std::sort(rankings.begin(), rankings.end(), 
+              [](const MatchRanking& a, const MatchRanking& b) {
+                  if (a.score != b.score) {
+                      return a.score > b.score;
+                  }
+                  return a.matchCount > b.matchCount;
+              });
+    
+    // Display top 10 (or fewer if less than 10)
+    std::cout << "Top potential matches:" << std::endl;
+    int displayCount = std::min(static_cast<int>(rankings.size()), 10);
+    
+    for (int i = 0; i < displayCount; ++i) {
+        const auto& ranking = rankings[i];
+        std::cout << "  " << (i + 1) << ". " 
+                  << ranking.songInfo.artist << " - " << ranking.songInfo.title
+                  << " (Score: " << ranking.score 
+                  << ", Matches: " << ranking.matchCount << ")" << std::endl;
+    }
+    std::cout << std::endl;
 }
 
 bool SongRecognizer::registerSong(const std::string& filename) {
@@ -294,6 +345,9 @@ SongInfo SongRecognizer::recognizeFromHashes(const std::vector<HashResult>& hash
     }
     
     std::cout << "Found potential matches in " << matches.size() << " songs" << std::endl;
+    
+    // Display top matches with rankings
+    displayTopMatches(matches);
     
     // Find best match
     std::string bestSongId = bestMatch(matches);
