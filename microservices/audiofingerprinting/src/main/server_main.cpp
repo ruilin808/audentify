@@ -377,8 +377,10 @@ private:
                     int durationMs = track["duration_ms"];
                     int minutes = durationMs / 60000;
                     int seconds = (durationMs % 60000) / 1000;
-                    char formatted[10];
-                    sprintf(formatted, "%d:%02d", minutes, seconds);
+                    // char formatted[10];
+                    // sprintf(formatted, "%d:%02d", minutes, seconds);
+                    char formatted[16];
+                    snprintf(formatted, sizeof(formatted), "%d:%02d", minutes, seconds);
                     trackInfo["durationFormatted"] = formatted;
                     
                     // Artists array

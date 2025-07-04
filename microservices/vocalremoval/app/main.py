@@ -75,7 +75,10 @@ class EnhancedAudioSeparatorService:
         
         self.temp_dir_base = os.path.join(os.getcwd(), "temp")
         self.model_dir = os.path.join(self.temp_dir_base, "models")
+        # Add downloads directory
+        self.downloads_dir = os.path.join(os.getcwd(), "downloads")
         os.makedirs(self.model_dir, exist_ok=True)
+        os.makedirs(self.downloads_dir, exist_ok=True)
         
         self.logger = logging.getLogger(__name__)
         self.log_level_int = getattr(logging, log_level.upper(), logging.INFO)
@@ -249,6 +252,14 @@ class EnhancedAudioSeparatorService:
             
             return separator_instance
 
+    def _save_to_downloads(self, wav_bytes: bytes, filename: str) -> str:
+        """Save audio bytes to downloads folder and return file path"""
+        file_path = os.path.join(self.downloads_dir, filename)
+        with open(file_path, 'wb') as f:
+            f.write(wav_bytes)
+        self.logger.info(f"Saved processed audio to: {file_path}")
+        return file_path
+
     async def process_url_advanced(self, url: str, method: str = "preserve_vocals") -> Tuple[bytes, str]:
         """Process URL with memory management"""
         task_id = str(uuid.uuid4())[:8]
@@ -279,6 +290,9 @@ class EnhancedAudioSeparatorService:
             else:
                 wav_bytes = await self._simple_speech_removal(audio_file, task_id)
                 filename = f"speech_removed_{task_id}.wav"
+            
+            # Save to downloads folder
+            self._save_to_downloads(wav_bytes, filename)
             
             return wav_bytes, filename
             
