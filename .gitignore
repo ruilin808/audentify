@@ -150,7 +150,7 @@ logs/
 *.log
 log/
 
-### Audio files ###
+### Files ###
 *.mp3
 *.wav
 *.flac
@@ -158,6 +158,7 @@ log/
 *.ogg
 *.m4a
 *.wma
+*.jpg
 
 ### Data (keep structure, not content) ###
 data/*.db
