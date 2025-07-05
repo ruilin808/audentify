@@ -159,6 +159,8 @@ log/
 *.m4a
 *.wma
 *.jpg
+*.dat
+*.txt
 
 ### Data (keep structure, not content) ###
 data/*.db
