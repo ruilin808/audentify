@@ -105,18 +105,27 @@ std::map<std::string, std::string> parseEnvFile(const std::string& filePath) {
     return env;
 }
 
-// Fuzzy string matching for track identification
-double calculateSimilarity(const std::string& str1, const std::string& str2) {
+// Enhanced similarity calculation for song matching
+double calculateSongSimilarity(const std::string& str1, const std::string& str2) {
     std::string s1 = str1, s2 = str2;
     
     // Convert to lowercase
     std::transform(s1.begin(), s1.end(), s1.begin(), ::tolower);
     std::transform(s2.begin(), s2.end(), s2.begin(), ::tolower);
     
-    // Remove common variations
+    // Remove common variations and punctuation
     std::regex featRegex(R"(\s*(feat\.|featuring|ft\.)\s*.*)", std::regex_constants::icase);
+    std::regex punctRegex(R"([^\w\s])");
+    
     s1 = std::regex_replace(s1, featRegex, "");
     s2 = std::regex_replace(s2, featRegex, "");
+    s1 = std::regex_replace(s1, punctRegex, " ");
+    s2 = std::regex_replace(s2, punctRegex, " ");
+    
+    // Normalize whitespace
+    std::regex wsRegex(R"(\s+)");
+    s1 = std::regex_replace(s1, wsRegex, " ");
+    s2 = std::regex_replace(s2, wsRegex, " ");
     
     // Trim whitespace
     s1.erase(0, s1.find_first_not_of(" \t"));
@@ -129,22 +138,28 @@ double calculateSimilarity(const std::string& str1, const std::string& str2) {
     
     // Check if one is contained in the other
     if (s1.find(s2) != std::string::npos || s2.find(s1) != std::string::npos) {
-        return 0.8;
+        return 0.9;
     }
     
-    // Simple character overlap calculation
-    std::set<char> chars1(s1.begin(), s1.end());
-    std::set<char> chars2(s2.begin(), s2.end());
+    // Word-based similarity
+    std::istringstream iss1(s1), iss2(s2);
+    std::set<std::string> words1, words2;
+    std::string word;
     
-    std::set<char> intersection;
-    std::set_intersection(chars1.begin(), chars1.end(),
-                         chars2.begin(), chars2.end(),
+    while (iss1 >> word) words1.insert(word);
+    while (iss2 >> word) words2.insert(word);
+    
+    if (words1.empty() || words2.empty()) return 0.0;
+    
+    std::set<std::string> intersection;
+    std::set_intersection(words1.begin(), words1.end(),
+                         words2.begin(), words2.end(),
                          std::inserter(intersection, intersection.begin()));
     
-    double overlap = static_cast<double>(intersection.size()) / 
-                    std::max(chars1.size(), chars2.size());
+    double wordSimilarity = static_cast<double>(intersection.size()) / 
+                           std::max(words1.size(), words2.size());
     
-    return overlap * 0.6; // Lower score for character overlap
+    return wordSimilarity * 0.8;
 }
 
 // Struct to hold API credentials
@@ -173,6 +188,20 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, HTTPRespo
     response->data.append((char*)contents, totalSize);
     return totalSize;
 }
+
+// Struct for matched song data
+struct MatchedSong {
+    std::string spotifyTrackId;
+    std::string spotifyTrackName;
+    std::string spotifyAlbumId;
+    std::string spotifyAlbumName;
+    std::string youtubeVideoId;
+    std::string youtubeTitle;
+    double similarity;
+    bool isMatch;
+    
+    MatchedSong() : similarity(0.0), isMatch(false) {}
+};
 
 class AudioFingerprintingServer {
 private:
@@ -322,202 +351,19 @@ private:
         return true;
     }
     
-    // Enhanced YouTube search with fallback strategies
-    json searchYouTubeVideo(const std::string& artist, const std::string& title) {
-        json result;
-        
-        if (!apiCreds.hasYouTube()) {
-            std::cout << "YouTube API key not available, skipping video search" << std::endl;
-            return result;
-        }
-        
-        // Try 3 different search strategies
-        std::vector<std::string> searchQueries = {
-            artist + " " + title + " official",
-            artist + " " + title + " music video",
-            artist + " " + title
-        };
-        
-        for (const auto& queryBase : searchQueries) {
-            std::string query = urlEncode(queryBase);
-            std::string url = "https://www.googleapis.com/youtube/v3/search"
-                             "?part=snippet"
-                             "&type=video"
-                             "&videoCategoryId=10" // Music category
-                             "&maxResults=10" // Get more results to filter
-                             "&order=relevance"
-                             "&q=" + query +
-                             "&key=" + apiCreds.youtubeApiKey;
-            
-            HTTPResponse response = makeHTTPRequest(url);
-            
-            if (response.responseCode == 200) {
-                try {
-                    json youtubeResponse = json::parse(response.data);
-                    if (youtubeResponse.contains("items") && !youtubeResponse["items"].empty()) {
-                        
-                        // Find the best video based on channel preferences
-                        json bestVideo = findBestYouTubeVideo(youtubeResponse["items"], artist);
-                        
-                        if (!bestVideo.is_null()) {
-                            json youtubeInfo;
-                            youtubeInfo["videoId"] = bestVideo["id"]["videoId"];
-                            youtubeInfo["url"] = "https://www.youtube.com/watch?v=" + 
-                                                bestVideo["id"]["videoId"].get<std::string>();
-                            youtubeInfo["title"] = bestVideo["snippet"]["title"];
-                            youtubeInfo["channelTitle"] = bestVideo["snippet"]["channelTitle"];
-                            
-                            // Get high quality thumbnail
-                            if (bestVideo["snippet"]["thumbnails"].contains("high")) {
-                                youtubeInfo["thumbnail"] = bestVideo["snippet"]["thumbnails"]["high"]["url"];
-                            } else if (bestVideo["snippet"]["thumbnails"].contains("default")) {
-                                youtubeInfo["thumbnail"] = bestVideo["snippet"]["thumbnails"]["default"]["url"];
-                            }
-                            
-                            result["youtube"] = youtubeInfo;
-                            std::cout << "Found YouTube video: " << youtubeInfo["title"] << 
-                                        " (Strategy: " << queryBase << ")" << std::endl;
-                            return result;
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    std::cerr << "YouTube API parsing error: " << e.what() << std::endl;
-                }
-            } else if (response.responseCode == 403) {
-                std::cerr << "YouTube API quota exceeded" << std::endl;
-                break; // No point trying other queries
-            } else {
-                std::cerr << "YouTube API request failed. HTTP " << response.responseCode << std::endl;
-            }
-        }
-        
-        return result;
-    }
-    
-    // Find best YouTube video based on channel preferences
-    json findBestYouTubeVideo(const json& videos, const std::string& artist) {
-        json bestVideo;
-        int bestScore = -1;
-        
-        for (const auto& video : videos) {
-            int score = 0;
-            std::string channelTitle = video["snippet"]["channelTitle"];
-            std::string channelTitleLower = channelTitle;
-            std::transform(channelTitleLower.begin(), channelTitleLower.end(), 
-                          channelTitleLower.begin(), ::tolower);
-            
-            std::string artistLower = artist;
-            std::transform(artistLower.begin(), artistLower.end(), 
-                          artistLower.begin(), ::tolower);
-            
-            // Check for "Official" in channel name (highest priority)
-            if (channelTitleLower.find("official") != std::string::npos) {
-                score += 100;
-            }
-            
-            // Check if channel name matches artist name
-            if (channelTitleLower.find(artistLower) != std::string::npos || 
-                artistLower.find(channelTitleLower) != std::string::npos) {
-                score += 50;
-            }
-            
-            // Note: YouTube API v3 doesn't provide view count in search results
-            // We could make additional API calls to get statistics, but that would use more quota
-            
-            if (score > bestScore) {
-                bestScore = score;
-                bestVideo = video;
-            }
-        }
-        
-        // If no video scored points, return the first one (relevance order)
-        if (bestVideo.is_null() && !videos.empty()) {
-            bestVideo = videos[0];
-        }
-        
-        return bestVideo;
-    }
-    
-    // Enhanced Spotify search with album-first approach
-    json searchSpotifyAlbum(const std::string& artist, const std::string& album, const std::string& trackTitle) {
-        json result;
+    // Enhanced Spotify search - Step 1: Find songs by name
+    MatchedSong findBestSpotifyTrack(const std::string& artist, const std::string& title) {
+        MatchedSong result;
         
         if (!ensureSpotifyToken()) {
             std::cout << "Spotify token not available" << std::endl;
             return result;
         }
         
-        // Strategy 1: Search for specific album
-        json albumResult = searchSpecificSpotifyAlbum(artist, album, trackTitle);
-        if (!albumResult.is_null()) {
-            result["spotify"] = albumResult;
-            return result;
-        }
-        
-        // Strategy 2: Search for track and find its album
-        json trackResult = searchSpotifyTrackAndAlbum(artist, trackTitle);
-        if (!trackResult.is_null()) {
-            result["spotify"] = trackResult;
-            return result;
-        }
-        
-        std::cout << "No Spotify results found for artist: " << artist << ", album: " << album << std::endl;
-        return result;
-    }
-    
-    json searchSpecificSpotifyAlbum(const std::string& artist, const std::string& album, const std::string& trackTitle) {
-        std::string query = urlEncode("artist:\"" + artist + "\" album:\"" + album + "\"");
+        // Search for tracks by name and artist
+        std::string query = urlEncode("track:\"" + title + "\" artist:\"" + artist + "\"");
         std::string url = "https://api.spotify.com/v1/search?q=" + query + 
-                         "&type=album&limit=5";
-        
-        std::vector<std::string> headers = {
-            "Authorization: Bearer " + apiCreds.spotifyAccessToken
-        };
-        
-        HTTPResponse response = makeHTTPRequest(url, headers);
-        
-        if (response.responseCode == 200) {
-            try {
-                json spotifyResponse = json::parse(response.data);
-                if (spotifyResponse.contains("albums") && 
-                    spotifyResponse["albums"].contains("items") &&
-                    !spotifyResponse["albums"]["items"].empty()) {
-                    
-                    // Try each album to find the one with our track
-                    for (const auto& albumData : spotifyResponse["albums"]["items"]) {
-                        std::string albumId = albumData["id"];
-                        json albumInfo = getSpotifyAlbumTracks(albumId, trackTitle);
-                        
-                        if (!albumInfo.is_null()) {
-                            albumInfo["albumUrl"] = albumData["external_urls"]["spotify"];
-                            albumInfo["albumId"] = albumId;
-                            albumInfo["albumName"] = albumData["name"];
-                            albumInfo["releaseDate"] = albumData["release_date"];
-                            
-                            // Get highest quality album image
-                            if (!albumData["images"].empty()) {
-                                albumInfo["albumImage"] = albumData["images"][0]["url"];
-                            }
-                            
-                            std::cout << "Found Spotify album (specific search): " << albumData["name"] << std::endl;
-                            return albumInfo;
-                        }
-                    }
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Spotify album search parsing error: " << e.what() << std::endl;
-            }
-        } else {
-            std::cerr << "Spotify album search failed. HTTP " << response.responseCode << std::endl;
-        }
-        
-        return nullptr;
-    }
-    
-    json searchSpotifyTrackAndAlbum(const std::string& artist, const std::string& trackTitle) {
-        std::string query = urlEncode("artist:\"" + artist + "\" track:\"" + trackTitle + "\"");
-        std::string url = "https://api.spotify.com/v1/search?q=" + query + 
-                         "&type=track&limit=10";
+                         "&type=track&limit=20";
         
         std::vector<std::string> headers = {
             "Authorization: Bearer " + apiCreds.spotifyAccessToken
@@ -532,25 +378,36 @@ private:
                     spotifyResponse["tracks"].contains("items") &&
                     !spotifyResponse["tracks"]["items"].empty()) {
                     
+                    double bestSimilarity = 0.0;
+                    json bestTrack;
+                    
                     // Find the best matching track
                     for (const auto& track : spotifyResponse["tracks"]["items"]) {
-                        std::string albumId = track["album"]["id"];
-                        json albumInfo = getSpotifyAlbumTracks(albumId, trackTitle);
+                        std::string trackName = track["name"];
+                        std::string trackArtist = track["artists"][0]["name"];
                         
-                        if (!albumInfo.is_null()) {
-                            albumInfo["albumUrl"] = track["album"]["external_urls"]["spotify"];
-                            albumInfo["albumId"] = albumId;
-                            albumInfo["albumName"] = track["album"]["name"];
-                            albumInfo["releaseDate"] = track["album"]["release_date"];
-                            
-                            // Get highest quality album image
-                            if (!track["album"]["images"].empty()) {
-                                albumInfo["albumImage"] = track["album"]["images"][0]["url"];
-                            }
-                            
-                            std::cout << "Found Spotify album (track search): " << track["album"]["name"] << std::endl;
-                            return albumInfo;
+                        // Calculate similarity for both title and artist
+                        double titleSim = calculateSongSimilarity(trackName, title);
+                        double artistSim = calculateSongSimilarity(trackArtist, artist);
+                        double combinedSim = (titleSim * 0.7) + (artistSim * 0.3);
+                        
+                        if (combinedSim > bestSimilarity) {
+                            bestSimilarity = combinedSim;
+                            bestTrack = track;
                         }
+                    }
+                    
+                    // Only accept matches with high confidence
+                    if (bestSimilarity >= 0.7 && !bestTrack.is_null()) {
+                        result.spotifyTrackId = bestTrack["id"];
+                        result.spotifyTrackName = bestTrack["name"];
+                        result.spotifyAlbumId = bestTrack["album"]["id"];
+                        result.spotifyAlbumName = bestTrack["album"]["name"];
+                        result.similarity = bestSimilarity;
+                        result.isMatch = true;
+                        
+                        std::cout << "Found Spotify track: " << result.spotifyTrackName 
+                                  << " (Similarity: " << bestSimilarity << ")" << std::endl;
                     }
                 }
             } catch (const std::exception& e) {
@@ -560,11 +417,16 @@ private:
             std::cerr << "Spotify track search failed. HTTP " << response.responseCode << std::endl;
         }
         
-        return nullptr;
+        return result;
     }
     
-    json getSpotifyAlbumTracks(const std::string& albumId, const std::string& targetTrackTitle) {
-        std::string url = "https://api.spotify.com/v1/albums/" + albumId + "/tracks";
+    // Step 2: Get album tracks using the matched song's album
+    json getSpotifyAlbumTracksEnhanced(const MatchedSong& matchedSong, const std::string& /* identifiedTitle */) {
+        if (!matchedSong.isMatch || matchedSong.spotifyAlbumId.empty()) {
+            return nullptr;
+        }
+        
+        std::string url = "https://api.spotify.com/v1/albums/" + matchedSong.spotifyAlbumId + "/tracks";
         
         std::vector<std::string> headers = {
             "Authorization: Bearer " + apiCreds.spotifyAccessToken
@@ -577,13 +439,21 @@ private:
                 json tracksResponse = json::parse(response.data);
                 json albumTracks;
                 albumTracks["tracks"] = json::array();
+                albumTracks["albumName"] = matchedSong.spotifyAlbumName;
+                albumTracks["albumId"] = matchedSong.spotifyAlbumId;
                 
-                bool foundTargetTrack = false;
-                double bestSimilarity = 0.0;
-                size_t bestTrackIndex = 0;
+                // Get album info for metadata
+                json albumInfo = getSpotifyAlbumInfo(matchedSong.spotifyAlbumId);
+                if (!albumInfo.is_null()) {
+                    albumTracks["albumUrl"] = albumInfo["external_urls"]["spotify"];
+                    albumTracks["releaseDate"] = albumInfo["release_date"];
+                    if (!albumInfo["images"].empty()) {
+                        albumTracks["albumImage"] = albumInfo["images"][0]["url"];
+                    }
+                }
                 
-                for (size_t i = 0; i < tracksResponse["items"].size(); ++i) {
-                    const auto& track = tracksResponse["items"][i];
+                // Process tracks and mark only the identified one
+                for (const auto& track : tracksResponse["items"]) {
                     json trackInfo;
                     trackInfo["name"] = track["name"];
                     trackInfo["trackNumber"] = track["track_number"];
@@ -612,49 +482,166 @@ private:
                     }
                     trackInfo["artists"] = artists;
                     
-                    // Check similarity with target track
-                    std::string trackName = track["name"];
-                    double similarity = calculateSimilarity(trackName, targetTrackTitle);
-                    
-                    if (similarity > bestSimilarity) {
-                        bestSimilarity = similarity;
-                        bestTrackIndex = i;
-                    }
-                    
-                    // Mark as identified if good match (threshold 0.7)
-                    trackInfo["isIdentifiedTrack"] = (similarity >= 0.7);
-                    if (similarity >= 0.7) {
-                        foundTargetTrack = true;
-                        std::cout << "Identified track with similarity " << similarity << ": " << trackName << std::endl;
-                    }
+                    // Mark as identified track only if it matches our originally found track
+                    std::string trackId = track["id"];
+                    trackInfo["isIdentifiedTrack"] = (trackId == matchedSong.spotifyTrackId);
                     
                     albumTracks["tracks"].push_back(trackInfo);
                 }
                 
-                // If no track met the threshold, mark the best match
-                if (!foundTargetTrack && bestSimilarity > 0.3 && !albumTracks["tracks"].empty()) {
-                    albumTracks["tracks"][bestTrackIndex]["isIdentifiedTrack"] = true;
-                    std::cout << "Best match with similarity " << bestSimilarity << ": " 
-                              << albumTracks["tracks"][bestTrackIndex]["name"] << std::endl;
-                }
+                std::cout << "Retrieved album tracks for: " << matchedSong.spotifyAlbumName 
+                          << " (Identified track: " << matchedSong.spotifyTrackName << ")" << std::endl;
                 
-                // Only return album info if we found a reasonable match
-                if (bestSimilarity > 0.3) {
-                    return albumTracks;
-                }
+                return albumTracks;
                 
             } catch (const std::exception& e) {
-                std::cerr << "Spotify tracks parsing error: " << e.what() << std::endl;
+                std::cerr << "Spotify album tracks parsing error: " << e.what() << std::endl;
             }
         } else {
-            std::cerr << "Spotify tracks request failed. HTTP " << response.responseCode << std::endl;
+            std::cerr << "Spotify album tracks request failed. HTTP " << response.responseCode << std::endl;
         }
         
         return nullptr;
     }
     
-    // Enhanced song info to JSON conversion with proper structure
-    json songInfoToJson(const AudioFingerprinting::SongInfo& songInfo) {
+    // Helper to get album info
+    json getSpotifyAlbumInfo(const std::string& albumId) {
+        std::string url = "https://api.spotify.com/v1/albums/" + albumId;
+        
+        std::vector<std::string> headers = {
+            "Authorization: Bearer " + apiCreds.spotifyAccessToken
+        };
+        
+        HTTPResponse response = makeHTTPRequest(url, headers);
+        
+        if (response.responseCode == 200) {
+            try {
+                return json::parse(response.data);
+            } catch (const std::exception& e) {
+                std::cerr << "Spotify album info parsing error: " << e.what() << std::endl;
+            }
+        }
+        
+        return nullptr;
+    }
+    
+    // Enhanced YouTube search with cross-verification
+    json searchYouTubeVideoEnhanced(const std::string& artist, const std::string& title, const MatchedSong& spotifyMatch) {
+        json result;
+        
+        if (!apiCreds.hasYouTube()) {
+            std::cout << "YouTube API key not available, skipping video search" << std::endl;
+            return result;
+        }
+        
+        // Try different search strategies
+        std::vector<std::string> searchQueries = {
+            artist + " " + title + " official",
+            artist + " " + title + " music video",
+            artist + " " + title
+        };
+        
+        for (const auto& queryBase : searchQueries) {
+            std::string query = urlEncode(queryBase);
+            std::string url = "https://www.googleapis.com/youtube/v3/search"
+                             "?part=snippet"
+                             "&type=video"
+                             "&videoCategoryId=10" // Music category
+                             "&maxResults=15" // Get more results for better matching
+                             "&order=relevance"
+                             "&q=" + query +
+                             "&key=" + apiCreds.youtubeApiKey;
+            
+            HTTPResponse response = makeHTTPRequest(url);
+            
+            if (response.responseCode == 200) {
+                try {
+                    json youtubeResponse = json::parse(response.data);
+                    if (youtubeResponse.contains("items") && !youtubeResponse["items"].empty()) {
+                        
+                        // Find the best video that matches our Spotify track
+                        json bestVideo = findBestMatchingYouTubeVideo(youtubeResponse["items"], 
+                                                                    artist, title, spotifyMatch);
+                        
+                        if (!bestVideo.is_null()) {
+                            json youtubeInfo;
+                            youtubeInfo["videoId"] = bestVideo["id"]["videoId"];
+                            youtubeInfo["url"] = "https://www.youtube.com/watch?v=" + 
+                                                bestVideo["id"]["videoId"].get<std::string>();
+                            youtubeInfo["title"] = bestVideo["snippet"]["title"];
+                            youtubeInfo["channelTitle"] = bestVideo["snippet"]["channelTitle"];
+                            
+                            // Get high quality thumbnail
+                            if (bestVideo["snippet"]["thumbnails"].contains("high")) {
+                                youtubeInfo["thumbnail"] = bestVideo["snippet"]["thumbnails"]["high"]["url"];
+                            } else if (bestVideo["snippet"]["thumbnails"].contains("default")) {
+                                youtubeInfo["thumbnail"] = bestVideo["snippet"]["thumbnails"]["default"]["url"];
+                            }
+                            
+                            result["youtube"] = youtubeInfo;
+                            std::cout << "Found matching YouTube video: " << youtubeInfo["title"] << std::endl;
+                            return result;
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "YouTube API parsing error: " << e.what() << std::endl;
+                }
+            } else if (response.responseCode == 403) {
+                std::cerr << "YouTube API quota exceeded" << std::endl;
+                break;
+            } else {
+                std::cerr << "YouTube API request failed. HTTP " << response.responseCode << std::endl;
+            }
+        }
+        
+        return result;
+    }
+    
+    // Find YouTube video that best matches our Spotify track
+    json findBestMatchingYouTubeVideo(const json& videos, const std::string& artist, 
+                                     const std::string& title, const MatchedSong& spotifyMatch) {
+        json bestVideo;
+        double bestScore = 0.0;
+        
+        for (const auto& video : videos) {
+            double score = 0.0;
+            std::string videoTitle = video["snippet"]["title"];
+            std::string channelTitle = video["snippet"]["channelTitle"];
+            
+            // Calculate title similarity
+            double titleSim = calculateSongSimilarity(videoTitle, title);
+            
+            // If we have a Spotify match, also compare with Spotify track name
+            if (spotifyMatch.isMatch) {
+                double spotifyTitleSim = calculateSongSimilarity(videoTitle, spotifyMatch.spotifyTrackName);
+                titleSim = std::max(titleSim, spotifyTitleSim);
+            }
+            
+            // Calculate artist/channel similarity
+            double artistSim = calculateSongSimilarity(channelTitle, artist);
+            
+            // Combine scores
+            score = (titleSim * 0.8) + (artistSim * 0.2);
+            
+            // Bonus for official channels
+            std::string channelLower = channelTitle;
+            std::transform(channelLower.begin(), channelLower.end(), channelLower.begin(), ::tolower);
+            if (channelLower.find("official") != std::string::npos) {
+                score += 0.1;
+            }
+            
+            // Only consider videos with reasonable similarity
+            if (score > bestScore && titleSim >= 0.6) {
+                bestScore = score;
+                bestVideo = video;
+            }
+        }
+        
+        return bestVideo;
+    }
+    
+    // Enhanced song info to JSON conversion with new workflow
+    json songInfoToJsonEnhanced(const AudioFingerprinting::SongInfo& songInfo) {
         json response;
         response["success"] = !songInfo.songId.empty();
         response["match"] = !songInfo.songId.empty();
@@ -665,17 +652,20 @@ private:
             response["title"] = songInfo.title;
             response["songId"] = songInfo.songId;
             
-            // Add YouTube video information
-            json youtubeResult = searchYouTubeVideo(songInfo.artist, songInfo.title);
+            // Step 1: Find the best matching Spotify track
+            MatchedSong spotifyMatch = findBestSpotifyTrack(songInfo.artist, songInfo.title);
+            
+            // Step 2: Get YouTube video that matches the same song
+            json youtubeResult = searchYouTubeVideoEnhanced(songInfo.artist, songInfo.title, spotifyMatch);
             if (youtubeResult.contains("youtube")) {
                 response["youtube"] = youtubeResult["youtube"];
             }
             
-            // Add Spotify album information
-            if (!songInfo.album.empty()) {
-                json spotifyResult = searchSpotifyAlbum(songInfo.artist, songInfo.album, songInfo.title);
-                if (spotifyResult.contains("spotify")) {
-                    response["spotify"] = spotifyResult["spotify"];
+            // Step 3: Get full album using the matched Spotify track's album
+            if (spotifyMatch.isMatch) {
+                json spotifyAlbum = getSpotifyAlbumTracksEnhanced(spotifyMatch, songInfo.title);
+                if (!spotifyAlbum.is_null()) {
+                    response["spotify"] = spotifyAlbum;
                 }
             }
             
@@ -842,8 +832,8 @@ public:
             
             cleanupTempFile(tempFilePath);
             
-            // Build enhanced response with YouTube and Spotify data
-            json response = songInfoToJson(result);
+            // Build enhanced response with improved workflow
+            json response = songInfoToJsonEnhanced(result);
             response["recognitionTimeMs"] = duration.count();
             
             res.set_header("Access-Control-Allow-Origin", "*");
@@ -904,7 +894,7 @@ public:
             
             cleanupTempFile(tempFilePath);
             
-            json response = songInfoToJson(result);
+            json response = songInfoToJsonEnhanced(result);
             response["recognitionTimeMs"] = duration.count();
             
             res.set_header("Access-Control-Allow-Origin", "*");
