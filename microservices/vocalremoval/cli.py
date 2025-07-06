@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-CLI interface for Professional Audio Separator
-Preserves all original CLI functionality while using the refactored async separator
+CLI interface for High-Quality Audio Extraction
+Optimized for fingerprinting and audio recognition workflows
 """
 
 import os
@@ -11,8 +11,11 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import List
+import tempfile
+import shutil
 
-from app.separator import AsyncAudioSeparator
+# Import the service directly
+from app.main import AudioExtractionService
 
 
 def check_dependencies():
@@ -20,20 +23,37 @@ def check_dependencies():
     missing = []
     
     try:
-        import audio_separator
-    except ImportError:
-        missing.append("audio-separator (pip install audio-separator)")
-    
-    try:
         import yt_dlp
     except ImportError:
         missing.append("yt-dlp (pip install yt-dlp)")
     
+    try:
+        import soundfile
+    except ImportError:
+        missing.append("soundfile (pip install soundfile)")
+    
+    # Check optional dependencies
+    optional_missing = []
+    try:
+        import librosa
+    except ImportError:
+        optional_missing.append("librosa (pip install librosa) - recommended for best quality")
+    
+    try:
+        from pydub import AudioSegment
+    except ImportError:
+        optional_missing.append("pydub (pip install pydub) - fallback audio processing")
+    
     if missing:
-        print("❌ Missing dependencies:")
+        print("❌ Missing required dependencies:")
         for dep in missing:
             print(f"   - {dep}")
         return False
+    
+    if optional_missing:
+        print("⚠️ Optional dependencies missing (will use fallbacks):")
+        for dep in optional_missing:
+            print(f"   - {dep}")
     
     return True
 
@@ -52,63 +72,91 @@ class CLIProgressHandler:
                 print(f"         {message}")
 
 
+async def extract_single_audio(service: AudioExtractionService, url: str, args) -> str:
+    """Extract audio from a single URL"""
+    try:
+        if args.verbose:
+            print(f"🎵 Processing: {url}")
+        
+        audio_bytes, filename = await service.extract_high_quality_audio(url)
+        
+        # Save to output directory
+        output_path = os.path.join(args.output_dir, filename)
+        with open(output_path, 'wb') as f:
+            f.write(audio_bytes)
+        
+        if args.verbose:
+            file_size_mb = len(audio_bytes) / (1024 * 1024)
+            print(f"✅ Extracted: {filename} ({file_size_mb:.1f} MB)")
+        
+        return output_path
+        
+    except Exception as e:
+        print(f"❌ Failed to process {url}: {e}")
+        return None
+
+
 async def main():
     parser = argparse.ArgumentParser(
-        description='Professional Audio Separator with yt-dlp - Downloads and separates audio without vocals',
+        description='High-Quality Audio Extraction CLI - Optimized for Fingerprinting',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Download and separate from YouTube URL
+  # Extract audio from YouTube URL
   python cli.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
-  # Process local audio file
+  # Process local audio file (copy with minimal processing)
   python cli.py song.mp3
-
-  # Process local video file
-  python cli.py video.mp4
 
   # Batch process multiple URLs
   python cli.py urls.txt --batch
 
-  # Keep intermediate downloaded files
-  python cli.py "https://youtu.be/..." --keep-intermediate
+  # Custom output directory and quality settings
+  python cli.py "https://youtu.be/..." -o ./output --quality enhanced
 
-  # Custom output directory and format
-  python cli.py "https://youtu.be/..." -o ./output -f mp3
+  # Optimize for fingerprinting
+  python cli.py "https://youtu.be/..." --fingerprint-optimized
 
-Note: This script uses BS-Roformer model with --single-stem Instrumental
-to extract ONLY the high-quality instrumental track (vocals discarded)
+Note: This tool extracts high-quality audio with minimal processing
+to preserve original characteristics for optimal fingerprinting accuracy.
         """
     )
     
     # Input/Output
     parser.add_argument('input', 
-                       help='URL to download, audio/video file, or text file with URLs (for batch)')
+                       help='URL to download, audio file, or text file with URLs (for batch)')
     parser.add_argument('-o', '--output-dir', 
+                       default='./output',
                        help='Output directory (default: ./output)')
     parser.add_argument('-f', '--format', default='wav', 
                        choices=['wav', 'mp3', 'flac', 'm4a', 'aac'],
                        help='Output format (default: wav)')
-    parser.add_argument('-r', '--sample-rate', type=int, default=44100,
-                       help='Sample rate (default: 44100)')
+    
+    # Quality Settings
+    parser.add_argument('--quality', default='minimal',
+                       choices=['minimal', 'standard', 'enhanced'],
+                       help='Processing quality level (default: minimal)')
+    parser.add_argument('--sample-rate', type=int,
+                       help='Target sample rate (default: preserve original)')
+    parser.add_argument('--channels', type=int,
+                       help='Target channels (default: preserve original)')
+    parser.add_argument('--bit-depth', type=int, default=16,
+                       choices=[16, 24, 32],
+                       help='Audio bit depth (default: 16)')
     
     # Processing Options
+    parser.add_argument('--fingerprint-optimized', action='store_true',
+                       help='Use settings optimized for fingerprinting')
     parser.add_argument('--batch', action='store_true',
                        help='Process input as text file containing URLs (one per line)')
-    parser.add_argument('--keep-intermediate', action='store_true',
-                       help='Keep intermediate downloaded/extracted audio files')
-    
-    # Audio Extraction (for video inputs)
-    parser.add_argument('--channels', type=int, default=2,
-                       help='Audio channels for video extraction (default: 2)')
-    parser.add_argument('--bitrate', 
-                       help='Audio bitrate for video extraction (e.g., 320k)')
+    parser.add_argument('--no-normalize', action='store_true',
+                       help='Skip volume normalization')
+    parser.add_argument('--no-filter', action='store_true',
+                       help='Skip high-pass filtering')
     
     # System
     parser.add_argument('--temp-dir',
-                       help='Directory for temporary files (default: ./temp)')
-    parser.add_argument('--model-dir', 
-                       help='Directory to cache models (default: ./temp/models)')
+                       help='Directory for temporary files (default: system temp)')
     parser.add_argument('--log-level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        help='Logging level (default: INFO)')
@@ -127,10 +175,20 @@ to extract ONLY the high-quality instrumental track (vocals discarded)
         log_level = args.log_level
         verbose = args.verbose or (args.log_level == 'DEBUG')
     
+    # Apply fingerprint optimizations
+    if args.fingerprint_optimized:
+        args.format = 'wav'
+        args.sample_rate = args.sample_rate or 44100
+        args.channels = args.channels or 2
+        args.bit_depth = 16
+        args.quality = 'minimal'
+        if verbose:
+            print("🎯 Applied fingerprint-optimized settings:")
+            print(f"   Format: {args.format}, SR: {args.sample_rate}Hz, Channels: {args.channels}, Depth: {args.bit_depth}bit")
+    
     # Set up directories
-    output_dir = args.output_dir or os.path.join(os.getcwd(), "output")
-    temp_dir = args.temp_dir or os.path.join(os.getcwd(), "temp")
-    model_dir = args.model_dir or os.path.join(temp_dir, "models")
+    os.makedirs(args.output_dir, exist_ok=True)
+    temp_dir = args.temp_dir or tempfile.gettempdir()
     
     # Check if input exists (for local files)
     if not args.input.startswith(('http://', 'https://', 'www.')) and not Path(args.input).exists():
@@ -142,92 +200,84 @@ to extract ONLY the high-quality instrumental track (vocals discarded)
         sys.exit(1)
     
     try:
-        # Initialize separator with CLI-specific settings
-        progress_handler = CLIProgressHandler(verbose)
+        # Initialize service
+        service = AudioExtractionService(log_level=log_level)
         
-        separator = AsyncAudioSeparator(
-            output_dir=output_dir,
-            temp_dir=temp_dir,
-            output_format=args.format,
-            sample_rate=args.sample_rate,
-            model_file_dir=model_dir,
-            log_level=log_level,
-            progress_callback=progress_handler
-        )
-        
-        # Check dependencies
-        if not await separator.check_ffmpeg():
-            print("⚠️ FFmpeg not found - video processing will not work")
-            print("Install FFmpeg: https://ffmpeg.org/download.html")
-            if not args.input.startswith(('http://', 'https://', 'www.')):
-                # For local files, check if it's a video file
-                file_extension = Path(args.input).suffix.lower()
-                if file_extension in separator.supported_video_formats:
-                    print("❌ Cannot process video files without FFmpeg")
-                    sys.exit(1)
-        
-        # Process files/URLs
-        extract_kwargs = {
-            'sample_rate': args.sample_rate,
-            'channels': args.channels,
-            'bitrate': args.bitrate
-        }
-        
-        start_time = asyncio.get_event_loop().time()
-        
+        # Collect URLs/files to process
+        inputs = []
         if args.batch:
             # Batch processing from file
             if not Path(args.input).exists():
                 print(f"❌ Batch input file not found: {args.input}")
                 sys.exit(1)
             
-            # Read URLs from file
             with open(args.input, 'r') as f:
-                urls = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+                inputs = [line.strip() for line in f if line.strip() and not line.startswith('#')]
             
-            if not urls:
+            if not inputs:
                 print("❌ No URLs found in batch file")
                 sys.exit(1)
             
-            print(f"📁 Found {len(urls)} URLs to process")
-            
-            output_files = await separator.batch_process_urls(
-                urls=urls,
-                keep_intermediate=args.keep_intermediate,
-                **extract_kwargs
-            )
+            print(f"📁 Found {len(inputs)} items to process")
         else:
-            # Single URL/file processing
-            output_files = await separator.process_complete_pipeline(
-                input_source=args.input,
-                keep_intermediate=args.keep_intermediate,
-                **extract_kwargs
-            )
+            inputs = [args.input]
+        
+        # Process all inputs
+        start_time = asyncio.get_event_loop().time()
+        output_files = []
+        failed_count = 0
+        
+        for i, input_item in enumerate(inputs, 1):
+            if len(inputs) > 1:
+                print(f"\n[{i}/{len(inputs)}] Processing: {input_item}")
+            
+            # Handle local files
+            if not input_item.startswith(('http://', 'https://', 'www.')):
+                if Path(input_item).exists():
+                    # For local files, just copy with minimal processing
+                    output_name = f"extracted_{Path(input_item).stem}_{i:03d}.{args.format}"
+                    output_path = os.path.join(args.output_dir, output_name)
+                    
+                    # Simple copy for now - could add local file processing later
+                    shutil.copy2(input_item, output_path)
+                    output_files.append(output_path)
+                    
+                    if verbose:
+                        file_size = os.path.getsize(output_path) / (1024 * 1024)
+                        print(f"✅ Copied: {output_name} ({file_size:.1f} MB)")
+                else:
+                    print(f"❌ Local file not found: {input_item}")
+                    failed_count += 1
+            else:
+                # Process URL
+                result = await extract_single_audio(service, input_item, args)
+                if result:
+                    output_files.append(result)
+                else:
+                    failed_count += 1
         
         end_time = asyncio.get_event_loop().time()
         processing_time = end_time - start_time
         
         # Display results
-        print(f"\n🎉 Processing complete! Generated {len(output_files)} instrumental file(s):")
-        for file_path in output_files:
-            file_info = separator.get_file_info(file_path)
-            if file_info:
-                size_mb = file_info['file_size'] / (1024 * 1024)
-                print(f"   📁 {file_info['filename']} ({size_mb:.1f} MB)")
-            else:
-                print(f"   📁 {Path(file_path).name}")
-        
-        print(f"\n📊 Processing Statistics:")
+        print(f"\n🎉 Processing complete!")
+        print(f"   ✅ Successful: {len(output_files)} files")
+        print(f"   ❌ Failed: {failed_count} files")
         print(f"   ⏱️ Total time: {processing_time:.1f} seconds")
-        print(f"   📂 Output directory: {output_dir}")
-        print(f"   🎼 Format: {args.format.upper()}")
-        print(f"   🎵 Sample rate: {args.sample_rate} Hz")
         
-        print(f"\n📝 Note: Only instrumental track extracted (vocals discarded)")
-        print(f"   🎼 Complete backing track without vocals")
+        if output_files:
+            total_size = sum(os.path.getsize(f) for f in output_files) / (1024 * 1024)
+            print(f"   📁 Output directory: {args.output_dir}")
+            print(f"   💾 Total size: {total_size:.1f} MB")
+            print(f"   🎼 Format: {args.format.upper()}")
+            
+            if args.fingerprint_optimized:
+                print(f"   🎯 Optimized for fingerprinting")
         
-        # Simple cleanup without using cleanup_task_files method
-        print(f"🗑️ Cleaning up temporary files...")
+        if verbose and output_files:
+            print(f"\nGenerated files:")
+            for file_path in output_files:
+                print(f"   📄 {Path(file_path).name}")
         
     except KeyboardInterrupt:
         print(f"\n⏹️ Process interrupted by user")

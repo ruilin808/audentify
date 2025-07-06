@@ -3,11 +3,13 @@ fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
 
-# Audio processing dependencies
-audio-separator==0.17.4
-yt-dlp
-onnxruntime>=1.16.0  # Required by audio-separator
-soundfile>=0.12.1    # For in-memory audio processing
+# Audio processing dependencies (lightweight)
+yt-dlp>=2023.12.30
+soundfile>=0.12.1    # For high-quality audio I/O
+
+# Audio processing libraries (optional but recommended)
+librosa>=0.10.1      # Preferred for high-quality audio processing
+pydub>=0.25.1        # Fallback audio processing
 
 # Core utilities
 pydantic==2.5.0
@@ -16,3 +18,10 @@ aiofiles==23.2.0
 
 # HTTP client for testing
 httpx==0.25.2
+
+# Scientific computing (required by librosa)
+numpy>=1.21.0
+scipy>=1.7.0
+
+# Additional audio format support
+ffmpeg-python>=0.2.0  # Python wrapper for FFmpeg (optional)

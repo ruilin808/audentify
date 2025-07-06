@@ -1,9 +1,10 @@
 """
-Enhanced Pydantic models for API requests and responses
+Pydantic models for High-Quality Audio Extraction API
+Optimized for fingerprinting and audio recognition workflows
 """
 
 from pydantic import BaseModel, HttpUrl, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from enum import Enum
 
 
@@ -16,11 +17,11 @@ class AudioFormat(str, Enum):
     aac = "aac"
 
 
-class ProcessingMethod(str, Enum):
-    """Audio processing methods"""
-    preserve_vocals = "preserve_vocals"  # Remove speech but keep singing vocals
-    instrumental_only = "instrumental_only"  # Remove all vocals
-    simple = "simple"  # Basic speech removal using TikTok model
+class ProcessingQuality(str, Enum):
+    """Audio processing quality levels"""
+    minimal = "minimal"        # Minimal processing - preserve original characteristics
+    standard = "standard"      # Light normalization and cleanup
+    enhanced = "enhanced"      # More aggressive noise reduction and enhancement
 
 
 class LogLevel(str, Enum):
@@ -31,123 +32,179 @@ class LogLevel(str, Enum):
     ERROR = "ERROR"
 
 
-class ProcessUrlRequest(BaseModel):
-    """Request model for processing a single URL"""
-    url: HttpUrl = Field(..., description="URL to download and process")
-    method: ProcessingMethod = Field(
-        ProcessingMethod.preserve_vocals, 
-        description="Processing method to use"
+class ExtractAudioRequest(BaseModel):
+    """Request model for high-quality audio extraction"""
+    url: HttpUrl = Field(..., description="URL to download and extract audio from")
+    
+    # Audio quality settings
+    output_format: AudioFormat = Field(
+        AudioFormat.wav, 
+        description="Output audio format (WAV recommended for fingerprinting)"
     )
-    output_format: AudioFormat = Field(AudioFormat.wav, description="Output audio format")
-    sample_rate: int = Field(44100, description="Audio sample rate", ge=8000, le=192000)
-    keep_intermediate: bool = Field(False, description="Keep intermediate downloaded files")
-    channels: int = Field(2, description="Audio channels for video extraction", ge=1, le=8)
-    bitrate: Optional[str] = Field(None, description="Audio bitrate for video extraction (e.g., '320k')")
-
-
-class ProcessBatchRequest(BaseModel):
-    """Request model for batch processing URLs"""
-    urls: List[HttpUrl] = Field(..., description="List of URLs to process", min_items=1, max_items=50)
-    method: ProcessingMethod = Field(
-        ProcessingMethod.preserve_vocals, 
-        description="Processing method to use for all URLs"
+    sample_rate: Optional[int] = Field(
+        None, 
+        description="Target sample rate (None=preserve original, 44100 recommended for fingerprinting)", 
+        ge=8000, 
+        le=192000
     )
-    output_format: AudioFormat = Field(AudioFormat.wav, description="Output audio format")
-    sample_rate: int = Field(44100, description="Audio sample rate", ge=8000, le=192000)
-    keep_intermediate: bool = Field(False, description="Keep intermediate downloaded files")
-    channels: int = Field(2, description="Audio channels for video extraction", ge=1, le=8)
-    bitrate: Optional[str] = Field(None, description="Audio bitrate for video extraction")
+    preserve_original_quality: bool = Field(
+        True, 
+        description="Preserve original audio characteristics for fingerprinting"
+    )
+    
+    # Processing options
+    processing_quality: ProcessingQuality = Field(
+        ProcessingQuality.minimal, 
+        description="Level of audio processing to apply"
+    )
+    normalize_volume: bool = Field(
+        True, 
+        description="Apply gentle volume normalization"
+    )
+    remove_dc_offset: bool = Field(
+        True, 
+        description="Remove DC offset from audio"
+    )
+    high_pass_filter: bool = Field(
+        True, 
+        description="Apply light high-pass filter to remove sub-audible content"
+    )
+    
+    # Output settings
+    channels: Optional[int] = Field(
+        None, 
+        description="Target number of channels (None=preserve original, 1=mono, 2=stereo)", 
+        ge=1, 
+        le=8
+    )
+    bit_depth: int = Field(
+        16, 
+        description="Audio bit depth", 
+        choices=[16, 24, 32]
+    )
+    
+    # Download settings
+    prefer_original_codec: bool = Field(
+        False, 
+        description="Prefer original codec over conversion when possible"
+    )
+    max_duration: Optional[int] = Field(
+        None, 
+        description="Maximum duration in seconds (None=no limit)", 
+        ge=1, 
+        le=7200
+    )
 
 
-class ProcessingStatus(str, Enum):
-    """Processing status values"""
+class ExtractionStatus(str, Enum):
+    """Audio extraction status values"""
     queued = "queued"
     downloading = "downloading"
-    extracting = "extracting"
-    separating_vocals = "separating_vocals"
-    separating_speech = "separating_speech"
-    combining = "combining"
-    cleaning = "cleaning"
+    processing = "processing"
     completed = "completed"
     failed = "failed"
 
 
 class AudioFileInfo(BaseModel):
-    """Information about a processed audio file"""
+    """Information about an extracted audio file"""
     filename: str = Field(..., description="Name of the output file")
     file_path: str = Field(..., description="Path to the output file")
     file_size: int = Field(..., description="File size in bytes")
     duration: Optional[float] = Field(None, description="Audio duration in seconds")
     format: str = Field(..., description="Audio format")
-    sample_rate: int = Field(..., description="Sample rate")
-    processing_method: ProcessingMethod = Field(..., description="Method used for processing")
+    sample_rate: int = Field(..., description="Sample rate in Hz")
+    channels: int = Field(..., description="Number of audio channels")
+    bit_depth: int = Field(..., description="Audio bit depth")
+    
+    # Quality metrics
+    peak_level: Optional[float] = Field(None, description="Peak audio level in dB")
+    rms_level: Optional[float] = Field(None, description="RMS audio level in dB")
+    dynamic_range: Optional[float] = Field(None, description="Dynamic range in dB")
+    
+    # Processing info
+    processing_applied: List[str] = Field(default=[], description="List of processing steps applied")
+    original_format: Optional[str] = Field(None, description="Original source format")
+    conversion_quality: Optional[str] = Field(None, description="Quality of format conversion")
 
 
-class ProcessUrlResponse(BaseModel):
-    """Response model for URL processing"""
-    success: bool = Field(..., description="Whether processing was successful")
+class ExtractAudioResponse(BaseModel):
+    """Response model for audio extraction"""
+    success: bool = Field(..., description="Whether extraction was successful")
     task_id: str = Field(..., description="Unique task identifier")
-    status: ProcessingStatus = Field(..., description="Current processing status")
+    status: ExtractionStatus = Field(..., description="Extraction status")
     message: str = Field(..., description="Status message")
-    method_used: ProcessingMethod = Field(..., description="Processing method that was used")
-    output_files: List[AudioFileInfo] = Field(default=[], description="Generated audio files")
+    
+    # Output information
+    output_file: Optional[AudioFileInfo] = Field(None, description="Generated audio file info")
     processing_time: Optional[float] = Field(None, description="Total processing time in seconds")
-    models_used: List[str] = Field(default=[], description="List of AI models used in processing")
+    
+    # Source information
+    source_title: Optional[str] = Field(None, description="Title of source content")
+    source_duration: Optional[float] = Field(None, description="Duration of source content")
+    source_quality: Optional[str] = Field(None, description="Quality of source audio")
+    
+    # Processing details
+    processing_method: str = Field("minimal-hq-extraction", description="Processing method used")
+    quality_preserved: bool = Field(True, description="Whether original quality was preserved")
+    fingerprint_optimized: bool = Field(True, description="Whether optimized for fingerprinting")
+    
+    # Error handling
     error: Optional[str] = Field(None, description="Error message if failed")
-
-
-class ProcessBatchResponse(BaseModel):
-    """Response model for batch processing"""
-    success: bool = Field(..., description="Whether batch processing was successful")
-    task_id: str = Field(..., description="Unique batch task identifier")
-    total_urls: int = Field(..., description="Total number of URLs to process")
-    completed: int = Field(0, description="Number of URLs completed")
-    failed: int = Field(0, description="Number of URLs failed")
-    status: ProcessingStatus = Field(..., description="Overall batch status")
-    method_used: ProcessingMethod = Field(..., description="Processing method used for batch")
-    output_files: List[AudioFileInfo] = Field(default=[], description="All generated audio files")
-    failed_urls: List[str] = Field(default=[], description="URLs that failed to process")
-    processing_time: Optional[float] = Field(None, description="Total batch processing time")
+    warnings: List[str] = Field(default=[], description="Processing warnings")
 
 
 class TaskStatusResponse(BaseModel):
     """Response model for task status queries"""
     task_id: str = Field(..., description="Task identifier")
-    status: ProcessingStatus = Field(..., description="Current status")
+    status: ExtractionStatus = Field(..., description="Current status")
     progress: float = Field(0.0, description="Progress percentage (0-100)", ge=0, le=100)
     message: str = Field(..., description="Current status message")
     current_step: str = Field(..., description="Current processing step")
-    output_files: List[AudioFileInfo] = Field(default=[], description="Generated files so far")
+    
+    output_file: Optional[AudioFileInfo] = Field(None, description="Generated file info")
     error: Optional[str] = Field(None, description="Error message if failed")
+    warnings: List[str] = Field(default=[], description="Processing warnings")
+    
+    # Timestamps
     started_at: Optional[str] = Field(None, description="Task start time (ISO format)")
     completed_at: Optional[str] = Field(None, description="Task completion time (ISO format)")
+    estimated_completion: Optional[str] = Field(None, description="Estimated completion time")
 
 
-class ModelInfo(BaseModel):
-    """Information about available models"""
-    name: str = Field(..., description="Model filename")
-    description: str = Field(..., description="Model description")
-    architecture_type: str = Field(..., description="Type of model (vr_arch, mdx_net, etc.)")  # Changed from model_type
-    primary_stem: str = Field(..., description="Primary output stem")
-    is_loaded: bool = Field(..., description="Whether model is currently loaded")
-    file_size: Optional[int] = Field(None, description="Model file size in bytes")
-
-
-class AvailableModelsResponse(BaseModel):
-    """Response model for available models"""
-    models: List[ModelInfo] = Field(..., description="List of available models")
-    loaded_models: int = Field(..., description="Number of currently loaded models")
-    total_models: int = Field(..., description="Total number of available models")
+class ProcessingCapability(BaseModel):
+    """Information about processing capabilities"""
+    name: str = Field(..., description="Capability name")
+    available: bool = Field(..., description="Whether capability is available")
+    description: str = Field(..., description="Description of capability")
+    quality_impact: str = Field(..., description="Impact on audio quality")
 
 
 class HealthResponse(BaseModel):
     """Health check response"""
     status: str = Field("healthy", description="Service health status")
-    version: str = Field("1.0.0", description="API version")
-    dependencies: dict = Field(default_factory=dict, description="Dependency status")
-    available_methods: List[ProcessingMethod] = Field(
-        default_factory=lambda: list(ProcessingMethod), 
-        description="Available processing methods"
+    version: str = Field("5.0.0", description="API version")
+    
+    dependencies: Dict[str, Any] = Field(
+        default_factory=dict, 
+        description="Dependency status and capabilities"
+    )
+    
+    processing_capabilities: List[ProcessingCapability] = Field(
+        default_factory=list, 
+        description="Available processing capabilities"
+    )
+    
+    recommended_settings: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "fingerprinting": {
+                "format": "wav",
+                "sample_rate": 44100,
+                "channels": 2,
+                "bit_depth": 16,
+                "processing_quality": "minimal"
+            }
+        },
+        description="Recommended settings for different use cases"
     )
 
 
@@ -155,9 +212,41 @@ class ErrorResponse(BaseModel):
     """Error response model"""
     error: str = Field(..., description="Error type")
     message: str = Field(..., description="Error message")
-    details: Optional[dict] = Field(None, description="Additional error details")
+    details: Optional[Dict[str, Any]] = Field(None, description="Additional error details")
     task_id: Optional[str] = Field(None, description="Related task ID if applicable")
-    suggested_method: Optional[ProcessingMethod] = Field(
+    
+    # Suggestions for resolution
+    suggested_settings: Optional[Dict[str, Any]] = Field(
         None, 
-        description="Suggested alternative processing method"
+        description="Suggested settings to resolve the issue"
     )
+    retry_with_fallback: bool = Field(
+        False, 
+        description="Whether retrying with fallback settings might succeed"
+    )
+
+
+class SystemInfo(BaseModel):
+    """System information and capabilities"""
+    version: str = Field(..., description="API version")
+    supported_formats: List[AudioFormat] = Field(..., description="Supported output formats")
+    processing_qualities: List[ProcessingQuality] = Field(..., description="Available quality levels")
+    
+    # Technical capabilities
+    max_file_size: Optional[int] = Field(None, description="Maximum file size in bytes")
+    max_duration: Optional[int] = Field(None, description="Maximum duration in seconds")
+    supported_sample_rates: List[int] = Field(
+        default=[8000, 16000, 22050, 44100, 48000, 96000, 192000],
+        description="Supported sample rates"
+    )
+    
+    # Performance info
+    average_processing_speed: Optional[float] = Field(
+        None, 
+        description="Average processing speed (realtime factor)"
+    )
+    concurrent_limit: int = Field(4, description="Maximum concurrent extractions")
+
+
+# Commonly used type aliases for convenience
+AudioExtractionRequest = ExtractAudioRequest  # Alias for backward compatibility

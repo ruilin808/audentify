@@ -1,9 +1,7 @@
 """
-Audio Separator API Package
+High-Quality Audio Extraction API Package
+Optimized for fingerprinting and audio recognition workflows
 """
 
 # Make the app module importable
 from .main import app
-
-__version__ = "4.0.0-enhanced"
-__all__ = ["app"]
