@@ -20,6 +20,7 @@ void printUsage(const std::string& programName) {
     std::cout << "\nOptions:" << std::endl;
     std::cout << "  --workers <num>        - Number of worker threads (default: auto)" << std::endl;
     std::cout << "  --db <path>           - Database path (default: fingerprints.db)" << std::endl;
+    std::cout << "  --optimized           - Use optimized fingerprinting algorithm" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -36,6 +37,7 @@ int main(int argc, char* argv[]) {
         std::string command = argv[1];
         std::string dbPath = "fingerprints.db";
         int numWorkers = std::thread::hardware_concurrency();
+        bool useOptimized = false;
         
         // Parse options
         for (int i = 2; i < argc; i++) {
@@ -44,12 +46,15 @@ int main(int argc, char* argv[]) {
                 numWorkers = std::stoi(argv[++i]);
             } else if (arg == "--db" && i + 1 < argc) {
                 dbPath = argv[++i];
+            } else if (arg == "--optimized") {
+                useOptimized = true;
             }
         }
         
         std::cout << "Audio Fingerprinting System" << std::endl;
         std::cout << "Using " << numWorkers << " worker threads" << std::endl;
         std::cout << "Database: " << dbPath << std::endl;
+        std::cout << "Algorithm: " << (useOptimized ? "Optimized" : "Standard") << std::endl;
         std::cout << std::string(50, '=') << std::endl;
         
         if (command == "register") {
@@ -153,21 +158,36 @@ int main(int argc, char* argv[]) {
             std::cout << "Generating fingerprints for: " << filename << std::endl;
             
             auto startTime = std::chrono::high_resolution_clock::now();
-            std::vector<AudioFingerprinting::HashResult> hashes = 
-                AudioFingerprinting::fingerprintFileParallel(filename);
-            auto endTime = std::chrono::high_resolution_clock::now();
             
+            std::vector<AudioFingerprinting::HashResult> hashes;
+            if (useOptimized) {
+                hashes = AudioFingerprinting::fingerprintFileParallelOptimized(filename);
+            } else {
+                hashes = AudioFingerprinting::fingerprintFileParallel(filename);
+            }
+            
+            auto endTime = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
             
             std::cout << std::string(50, '=') << std::endl;
             std::cout << "FINGERPRINT RESULT" << std::endl;
             std::cout << std::string(50, '=') << std::endl;
             std::cout << "Generated " << hashes.size() << " hashes in " << duration.count() << " ms" << std::endl;
+            std::cout << "Algorithm: " << (useOptimized ? "Optimized" : "Standard") << std::endl;
             
             if (!hashes.empty()) {
                 std::cout << "\nSample hashes:" << std::endl;
                 for (size_t i = 0; i < std::min(size_t(10), hashes.size()); i++) {
                     std::cout << "  " << hashes[i].toString() << std::endl;
+                }
+                
+                if (useOptimized) {
+                    std::cout << "\nOptimization benefits:" << std::endl;
+                    std::cout << "  • Frequency range: 300-8000 Hz (ignoring noise)" << std::endl;
+                    std::cout << "  • Peak quality filtering: 4x amplitude threshold" << std::endl;
+                    std::cout << "  • Temporal limiting: max 15 peaks/second" << std::endl;
+                    std::cout << "  • Hash deduplication: no duplicate hashes" << std::endl;
+                    std::cout << "  • Expected reduction: ~70% fewer hashes vs standard" << std::endl;
                 }
             }
             

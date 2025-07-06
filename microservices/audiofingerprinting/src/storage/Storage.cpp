@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <functional>
 #include <iomanip>
+#include <chrono>
+#include <thread>
 
 namespace AudioFingerprinting {
 
@@ -24,8 +26,14 @@ bool Database::open() {
         return false;
     }
     
-    // Set timeout for better concurrency
+    // Set timeout for better concurrency (30 seconds)
     sqlite3_busy_timeout(db, 30000);
+    
+    // Enable better concurrency settings
+    executeSQL("PRAGMA journal_mode=WAL");
+    executeSQL("PRAGMA synchronous=NORMAL");
+    executeSQL("PRAGMA cache_size=10000");
+    executeSQL("PRAGMA temp_store=MEMORY");
     
     isOpen = true;
     return setupTables();
@@ -33,6 +41,8 @@ bool Database::open() {
 
 void Database::close() {
     if (isOpen && db) {
+        // Checkpoint WAL before closing
+        sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nullptr, nullptr, nullptr);
         sqlite3_close(db);
         db = nullptr;
         isOpen = false;
@@ -40,11 +50,16 @@ void Database::close() {
 }
 
 bool Database::executeSQL(const std::string& sql) {
+    if (!isOpen || !db) {
+        std::cerr << "Database not open" << std::endl;
+        return false;
+    }
+    
     char* errMsg = nullptr;
     int rc = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &errMsg);
     
     if (rc != SQLITE_OK) {
-        std::cerr << "SQL error: " << errMsg << std::endl;
+        std::cerr << "SQL error: " << errMsg << " (Code: " << rc << ")" << std::endl;
         sqlite3_free(errMsg);
         return false;
     }
@@ -78,15 +93,9 @@ bool Database::setupTables() {
     std::string createIndex = 
         "CREATE INDEX IF NOT EXISTS idx_hash ON hash (hash)";
     
-    // Enable WAL mode for better concurrency
-    std::string enableWAL = "PRAGMA journal_mode=WAL";
-    std::string setCheckpoint = "PRAGMA wal_autocheckpoint=300";
-    
     return executeSQL(createHashTable) && 
            executeSQL(createSongTable) && 
-           executeSQL(createIndex) && 
-           executeSQL(enableWAL) && 
-           executeSQL(setCheckpoint);
+           executeSQL(createIndex);
 }
 
 bool Database::checkpointDb() {
@@ -132,71 +141,123 @@ bool Database::songInDb(const std::string& filename) {
 
 bool Database::storeSong(const std::vector<HashResult>& hashes, const SongInfo& songInfo) {
     if (!isOpen || hashes.empty()) {
+        std::cerr << "Database not open or no hashes provided" << std::endl;
         return false;
     }
     
-    // Begin transaction
-    if (!executeSQL("BEGIN TRANSACTION")) {
-        return false;
-    }
-    
-    // Insert hashes
-    sqlite3_stmt* hashStmt;
-    const char* hashSql = "INSERT INTO hash (hash, offset, song_id) VALUES (?, ?, ?)";
-    
-    int rc = sqlite3_prepare_v2(db, hashSql, -1, &hashStmt, nullptr);
-    if (rc != SQLITE_OK) {
-        executeSQL("ROLLBACK");
-        return false;
-    }
-    
-    for (const auto& hash : hashes) {
-        sqlite3_bind_int64(hashStmt, 1, hash.hash);
-        sqlite3_bind_double(hashStmt, 2, hash.timeOffset);
-        sqlite3_bind_text(hashStmt, 3, hash.songId.c_str(), -1, SQLITE_STATIC);
+    // Retry mechanism for database locks
+    const int maxRetries = 3;
+    for (int attempt = 0; attempt < maxRetries; attempt++) {
+        if (attempt > 0) {
+            std::cout << "  Retrying database operation (attempt " << (attempt + 1) << ")" << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100 * attempt));
+        }
         
-        rc = sqlite3_step(hashStmt);
-        if (rc != SQLITE_DONE) {
-            std::cerr << "Failed to insert hash: " << sqlite3_errmsg(db) << std::endl;
-            sqlite3_finalize(hashStmt);
-            executeSQL("ROLLBACK");
+        // Begin transaction with immediate lock
+        if (!executeSQL("BEGIN IMMEDIATE TRANSACTION")) {
+            if (attempt < maxRetries - 1) continue;
+            std::cerr << "Failed to begin transaction after " << maxRetries << " attempts" << std::endl;
             return false;
         }
         
-        sqlite3_reset(hashStmt);
-    }
-    
-    sqlite3_finalize(hashStmt);
-    
-    // Insert song info
-    sqlite3_stmt* infoStmt;
-    const char* infoSql = "INSERT OR REPLACE INTO song_info (artist, album, title, song_id) VALUES (?, ?, ?, ?)";
-    
-    rc = sqlite3_prepare_v2(db, infoSql, -1, &infoStmt, nullptr);
-    if (rc != SQLITE_OK) {
+        bool success = true;
+        
+        // Insert song info first
+        sqlite3_stmt* infoStmt;
+        const char* infoSql = "INSERT OR REPLACE INTO song_info (artist, album, title, song_id) VALUES (?, ?, ?, ?)";
+        
+        int rc = sqlite3_prepare_v2(db, infoSql, -1, &infoStmt, nullptr);
+        if (rc != SQLITE_OK) {
+            std::cerr << "Failed to prepare song info statement: " << sqlite3_errmsg(db) << std::endl;
+            executeSQL("ROLLBACK");
+            if (attempt < maxRetries - 1) continue;
+            return false;
+        }
+        
+        std::string artist = songInfo.artist.empty() ? "Unknown" : songInfo.artist;
+        std::string album = songInfo.album.empty() ? "Unknown" : songInfo.album;
+        std::string title = songInfo.title.empty() ? "Unknown" : songInfo.title;
+        
+        sqlite3_bind_text(infoStmt, 1, artist.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(infoStmt, 2, album.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(infoStmt, 3, title.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(infoStmt, 4, songInfo.songId.c_str(), -1, SQLITE_TRANSIENT);
+        
+        rc = sqlite3_step(infoStmt);
+        sqlite3_finalize(infoStmt);
+        
+        if (rc != SQLITE_DONE) {
+            std::cerr << "Failed to insert song info: " << sqlite3_errmsg(db) << std::endl;
+            executeSQL("ROLLBACK");
+            if (attempt < maxRetries - 1) continue;
+            return false;
+        }
+        
+        // Insert hashes in batches
+        sqlite3_stmt* hashStmt;
+        const char* hashSql = "INSERT INTO hash (hash, offset, song_id) VALUES (?, ?, ?)";
+        
+        rc = sqlite3_prepare_v2(db, hashSql, -1, &hashStmt, nullptr);
+        if (rc != SQLITE_OK) {
+            std::cerr << "Failed to prepare hash statement: " << sqlite3_errmsg(db) << std::endl;
+            executeSQL("ROLLBACK");
+            if (attempt < maxRetries - 1) continue;
+            return false;
+        }
+        
+        // Process hashes in smaller batches to avoid locks
+        const size_t batchSize = 1000;
+        for (size_t i = 0; i < hashes.size(); i += batchSize) {
+            size_t endIdx = std::min(i + batchSize, hashes.size());
+            
+            for (size_t j = i; j < endIdx; j++) {
+                const auto& hash = hashes[j];
+                
+                sqlite3_bind_int64(hashStmt, 1, hash.hash);
+                sqlite3_bind_double(hashStmt, 2, hash.timeOffset);
+                sqlite3_bind_text(hashStmt, 3, hash.songId.c_str(), -1, SQLITE_TRANSIENT);
+                
+                rc = sqlite3_step(hashStmt);
+                if (rc != SQLITE_DONE) {
+                    std::cerr << "Failed to insert hash: " << sqlite3_errmsg(db) << " (Code: " << rc << ")" << std::endl;
+                    success = false;
+                    break;
+                }
+                
+                sqlite3_reset(hashStmt);
+            }
+            
+            if (!success) break;
+            
+            // Periodic progress update for large batches
+            if (endIdx % 5000 == 0) {
+                std::cout << "  Inserted " << endIdx << "/" << hashes.size() << " hashes..." << std::endl;
+            }
+        }
+        
+        sqlite3_finalize(hashStmt);
+        
+        if (success) {
+            // Commit transaction
+            if (executeSQL("COMMIT")) {
+                std::cout << "  Successfully stored " << hashes.size() << " hashes" << std::endl;
+                return true;
+            } else {
+                std::cerr << "Failed to commit transaction: " << sqlite3_errmsg(db) << std::endl;
+            }
+        }
+        
+        // Rollback on failure
         executeSQL("ROLLBACK");
-        return false;
+        
+        if (attempt < maxRetries - 1) {
+            std::cout << "  Database operation failed, retrying..." << std::endl;
+            continue;
+        }
     }
     
-    std::string artist = songInfo.artist.empty() ? "Unknown" : songInfo.artist;
-    std::string album = songInfo.album.empty() ? "Unknown" : songInfo.album;
-    std::string title = songInfo.title.empty() ? "Unknown" : songInfo.title;
-    
-    sqlite3_bind_text(infoStmt, 1, artist.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(infoStmt, 2, album.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(infoStmt, 3, title.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(infoStmt, 4, songInfo.songId.c_str(), -1, SQLITE_STATIC);
-    
-    rc = sqlite3_step(infoStmt);
-    sqlite3_finalize(infoStmt);
-    
-    if (rc != SQLITE_DONE) {
-        executeSQL("ROLLBACK");
-        return false;
-    }
-    
-    // Commit transaction
-    return executeSQL("COMMIT");
+    std::cerr << "Failed to store song after " << maxRetries << " attempts" << std::endl;
+    return false;
 }
 
 std::map<std::string, std::vector<MatchOffset>> Database::getMatches(

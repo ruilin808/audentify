@@ -25,10 +25,11 @@ struct Peak {
     int timeIdx;
     double frequency;
     double time;
+    double amplitude; // NEW: Store amplitude for better filtering
     
-    Peak() : freqIdx(0), timeIdx(0), frequency(0.0), time(0.0) {}
+    Peak() : freqIdx(0), timeIdx(0), frequency(0.0), time(0.0), amplitude(0.0) {}
     Peak(int freqIdx, int timeIdx, double freq, double time)
-        : freqIdx(freqIdx), timeIdx(timeIdx), frequency(freq), time(time) {}
+        : freqIdx(freqIdx), timeIdx(timeIdx), frequency(freq), time(time), amplitude(0.0) {}
 };
 
 struct HashResult {

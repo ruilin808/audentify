@@ -3,7 +3,6 @@
 
 #include "../utils/Types.h"
 #include "../core/Constants.h"
-#include "HashGenerator.h"
 #include "PeakDetection.h"
 #include "../audio/AudioLoader.h"
 #include "../audio/AudioProcessor.h"
@@ -15,9 +14,17 @@
 #include <future>
 #include <iostream>
 #include <fftw3.h>
+#include <unordered_set>
 
 namespace AudioFingerprinting {
 
+// Enhanced hash functions
+uint64_t hashPointPairEnhanced(const Peak& p1, const Peak& p2);
+std::vector<Peak> getTargetZoneOptimized(const Peak& anchor, const std::vector<Peak>& allPeaks);
+std::vector<HashResult> hashPointsOptimized(const std::vector<Peak>& peaks, const std::string& filename);
+std::vector<HashResult> fingerprintFileParallelOptimized(const std::string& filename);
+
+// Keep original functions for compatibility
 long hashPointPair(const Peak& p1, const Peak& p2);
 std::vector<Peak> getTargetZone(const Peak& anchor, const std::vector<Peak>& allPeaks);
 std::string generateSongId(const std::string& filename);

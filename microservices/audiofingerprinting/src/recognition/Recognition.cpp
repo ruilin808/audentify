@@ -217,8 +217,8 @@ bool SongRecognizer::registerSong(const std::string& filename) {
     try {
         std::cout << "Registering: " << filename << std::endl;
         
-        // Generate fingerprints
-        std::vector<HashResult> hashes = fingerprintFileParallel(filename);
+        // Use OPTIMIZED fingerprinting
+        std::vector<HashResult> hashes = fingerprintFileParallelOptimized(filename);
         
         if (hashes.empty()) {
             std::cerr << "Failed to generate fingerprints for: " << filename << std::endl;
@@ -317,8 +317,8 @@ SongInfo SongRecognizer::recognizeSong(const std::string& filename) {
     try {
         std::cout << "Recognizing: " << filename << std::endl;
         
-        // Generate fingerprints for the sample
-        std::vector<HashResult> hashes = fingerprintFileParallel(filename);
+        // Use OPTIMIZED fingerprinting for recognition too
+        std::vector<HashResult> hashes = fingerprintFileParallelOptimized(filename);
         
         if (hashes.empty()) {
             std::cerr << "Failed to generate fingerprints for sample" << std::endl;
@@ -423,7 +423,8 @@ void registerSongThreadSafe(const std::string& filename, Database* database, std
             return;
         }
         
-        std::vector<HashResult> hashes = fingerprintFileParallel(filename);
+        // Use OPTIMIZED fingerprinting
+        std::vector<HashResult> hashes = fingerprintFileParallelOptimized(filename);
         
         // Extract metadata using TagLib directly
         SongInfo songInfo;
