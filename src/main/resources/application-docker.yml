@@ -1,0 +1,32 @@
+# application-docker.yml
+# Spring Boot configuration for Docker environment
+server:
+  port: 8081
+
+# Microservice URLs for Docker networking
+microservice1:
+  url: http://vocal-removal:8000
+
+microservice2:
+  url: http://audio-fingerprinting:8080
+
+# File upload settings
+spring:
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 200MB
+
+# HTTP client timeouts
+http:
+  timeout:
+    connection: 30000
+    read: 300000  # 5 minutes for video processing
+
+# Logging configuration
+logging:
+  level:
+    com.github.ruilin808.audentify: INFO
+    org.springframework.web: INFO
+  pattern:
+    console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"

@@ -1,0 +1,97 @@
+# .dockerignore for Python Vocal Removal Service
+# Place this in microservices/vocalremoval/.dockerignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.Python
+
+# Python distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+.spyderproject
+.spyproject
+
+# OS files
+.DS_Store
+Thumbs.db
+._.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+output/
+downloads/
+*.log
+
+# Model files (large files should be downloaded at runtime)
+*.pth
+*.pt
+*.ckpt
+models/
+
+# Audio files (test files)
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.aac
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+README.md
+*.md
+docs/
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore

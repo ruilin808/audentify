@@ -2,6 +2,7 @@
 #define CIRCULAR_BUFFER_H
 
 #include <vector>
+#include <cstddef>
 
 namespace AudioFingerprinting {
 

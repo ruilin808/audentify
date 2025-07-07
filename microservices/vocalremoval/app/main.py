@@ -41,14 +41,14 @@ class AudioExtractionService:
                 self.librosa = librosa
                 self.has_librosa = True
             except ImportError:
-                try:
-                    from pydub import AudioSegment
-                    self.AudioSegment = AudioSegment
-                    self.has_pydub = True
-                    self.has_librosa = False
-                except ImportError:
-                    self.has_librosa = False
-                    self.has_pydub = False
+                self.has_librosa = False
+                
+            try:
+                from pydub import AudioSegment
+                self.AudioSegment = AudioSegment
+                self.has_pydub = True
+            except ImportError:
+                self.has_pydub = False
                     
         except ImportError as e:
             raise ImportError(f"Required library not found! Error: {e}")

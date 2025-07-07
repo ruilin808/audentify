@@ -1,0 +1,64 @@
+# .dockerignore for main Spring Boot application
+
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+README.md
+*.md
+docs/
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts (Maven)
+target/
+!target/*.jar
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Python specific (exclude from main app)
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.Python
+**/.venv/
+**/.env
+
+# C++ specific (exclude from main app)
+**/build/
+**/cmake-build-*/
+**/*.o
+**/*.a
+**/*.so
+
+# Docker files (don't need in containers)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Environment files (will be handled separately)
+.env
+.env.*
+
+# Development tools
+.mvn/wrapper/maven-wrapper.jar
+mvnw
+mvnw.cmd

@@ -1,0 +1,83 @@
+# .dockerignore for C++ Audio Fingerprinting Service
+# Place this in microservices/audiofingerprinting/.dockerignore
+
+# Build directories and artifacts
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Compiled object files
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+audioFingerprintingCLI
+audioFingerprintingServer
+
+# IDE and editor files
+.vscode/
+.idea/
+*.iml
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.suo
+
+# OS files
+.DS_Store
+Thumbs.db
+._.DS_Store
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Database files (will be handled by volumes)
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache (in case any Python files exist)
+__pycache__/
+*.pyc
+*.pyo
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+README.md
+*.md
+docs/
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Environment files (handled separately)
+.env.example
+
+# Keep lib directory (contains dr_libs headers)
+!lib/
+!sample_songs/

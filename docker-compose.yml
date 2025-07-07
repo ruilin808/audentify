@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # Spring Boot Main Application
+  audentify-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.spring
+    ports:
+      - "8081:8081"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - MICROSERVICE1_URL=http://vocal-removal:8000
+      - MICROSERVICE2_URL=http://audio-fingerprinting:8080
+    depends_on:
+      - vocal-removal
+      - audio-fingerprinting
+    networks:
+      - audentify-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/test"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Python Vocal Removal Service
+  vocal-removal:
+    build:
+      context: ./microservices/vocalremoval
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - LOG_LEVEL=info
+    volumes:
+      - vocal_temp:/app/temp
+      - vocal_output:/app/output
+    networks:
+      - audentify-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # C++ Audio Fingerprinting Service
+  audio-fingerprinting:
+    build:
+      context: ./microservices/audiofingerprinting
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_PATH=/app/data/fingerprints.db
+      - PORT=8080
+    env_file:
+      - ./microservices/audiofingerprinting/.env
+    volumes:
+      - fingerprint_data:/app/data
+      - fingerprint_temp:/app/temp
+    networks:
+      - audentify-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  audentify-network:
+    driver: bridge
+
+volumes:
+  vocal_temp:
+  vocal_output:
+  fingerprint_data:
+  fingerprint_temp:
