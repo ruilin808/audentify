@@ -62,6 +62,7 @@ services:
     volumes:
       - fingerprint_data:/app/data
       - fingerprint_temp:/app/temp
+      - ./microservices/audiofingerprinting/sample_songs:/app/sample_songs  # Mount local sample songs
     networks:
       - audentify-network
     restart: unless-stopped

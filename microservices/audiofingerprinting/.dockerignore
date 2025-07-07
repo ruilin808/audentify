@@ -75,9 +75,9 @@ Dockerfile*
 docker-compose*.yml
 .dockerignore
 
-# Environment files (handled separately)
+# Environment files (handled separately in docker-compose)
 .env.example
 
-# Keep lib directory (contains dr_libs headers)
-!lib/
-!sample_songs/
+# Keep lib directory if it exists (contains dr_libs headers)
+# Note: Using COPY lib* lib/ in Dockerfile handles optional lib directory
+# The lib directory will be created and populated automatically if missing
