@@ -57,12 +57,15 @@ services:
     environment:
       - DB_PATH=/app/data/fingerprints.db
       - PORT=8080
+      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY:-}
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
     env_file:
-      - ./microservices/audiofingerprinting/.env
+      - .env
     volumes:
       - fingerprint_data:/app/data
       - fingerprint_temp:/app/temp
-      - ./microservices/audiofingerprinting/sample_songs:/app/sample_songs  # Mount local sample songs
+      - ./microservices/audiofingerprinting/sample_songs:/app/sample_songs
     networks:
       - audentify-network
     restart: unless-stopped

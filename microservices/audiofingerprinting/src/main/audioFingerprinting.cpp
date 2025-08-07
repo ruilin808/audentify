@@ -4,6 +4,8 @@
 #include <thread>
 #include <fftw3.h>
 #include <iomanip>
+#include <cstdlib>  // for getenv
+#include <cstring>  // for strlen
 
 #include "../audio/AudioLoader.h"
 #include "../processing/HashGenerator.h"
@@ -19,8 +21,19 @@ void printUsage(const std::string& programName) {
     std::cout << "  fingerprint <file>     - Generate fingerprints (no database)" << std::endl;
     std::cout << "\nOptions:" << std::endl;
     std::cout << "  --workers <num>        - Number of worker threads (default: auto)" << std::endl;
-    std::cout << "  --db <path>           - Database path (default: fingerprints.db)" << std::endl;
+    std::cout << "  --db <path>           - Database path (default: from DB_PATH env or fingerprints.db)" << std::endl;
     std::cout << "  --optimized           - Use optimized fingerprinting algorithm" << std::endl;
+}
+
+std::string getDefaultDatabasePath() {
+    // First check environment variable
+    const char* envDbPath = std::getenv("DB_PATH");
+    if (envDbPath && strlen(envDbPath) > 0) {
+        return std::string(envDbPath);
+    }
+    
+    // Fallback to default
+    return "fingerprints.db";
 }
 
 int main(int argc, char* argv[]) {
@@ -35,7 +48,7 @@ int main(int argc, char* argv[]) {
         }
         
         std::string command = argv[1];
-        std::string dbPath = "fingerprints.db";
+        std::string dbPath = getDefaultDatabasePath();  // Use environment-aware default
         int numWorkers = std::thread::hardware_concurrency();
         bool useOptimized = false;
         
