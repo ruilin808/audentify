@@ -21,7 +21,7 @@ git clone https://github.com/mackron/dr_libs.git audentify\microservices\audiofi
 ```
 Also ensure that docker is installed.
 
-### Installing
+### Start
 
 To start the program, run this in root directory 
 ```
@@ -72,9 +72,7 @@ Once you are on the webapp, you can upload links of videos like youtube shorts a
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details
+This project is licensed under the MIT License
 
-## Acknowledgments
-
-* Inspiration
+## Inspiratioh
 * Shazam
