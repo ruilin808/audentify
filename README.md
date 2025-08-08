@@ -60,7 +60,7 @@ Once you are on the webapp, you can upload links of videos like youtube shorts a
 
 ## Built With
 
-* [Spring Boot]([http://www.dropwizard.io/1.0.2/docs/](https://spring.io/projects/spring-boot) - The web framework used
+* [Spring Boot](https://spring.io/projects/spring-boot) - The web framework used
 * [Maven](https://maven.apache.org/) - Dependency Management
 * C++ - Used for fingerprinting and audio identification microservice
 * Python - Used to scrape audio from video links
